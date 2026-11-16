@@ -1,0 +1,10 @@
+{
+  "description": "A procurement and budgeting platform that helps businesses track inventory, forecast financials, set targets, and get AI-powered recommendations to reduce waste and improve profitability.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
