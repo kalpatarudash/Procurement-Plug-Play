@@ -41,6 +41,9 @@ react(),
       watch: {
         ignored: [
           '**/.figma/**',
+          // The Python backend (and its SQLite database, which changes on every write) is not
+          // part of the frontend; watching it reloads the page whenever the API saves anything.
+          '**/backend/**',
 ],
       },
     },

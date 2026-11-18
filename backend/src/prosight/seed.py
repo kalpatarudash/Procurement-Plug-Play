@@ -13,6 +13,7 @@ from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
+from . import runtime
 from .analytics import add_months, fiscal_year_start
 from .config import settings
 from .db import Base, SessionLocal, engine
@@ -196,6 +197,7 @@ def reset_and_seed() -> None:
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
+        runtime.apply(db)  # back to default as-of date, currency and fiscal year
         seed(db)
 
 

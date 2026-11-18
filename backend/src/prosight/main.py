@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import inspect, select
 
-from .api import actions, planning, recommendations, reporting, writeoffs
+from . import runtime
+from .api import actions, imports, planning, recommendations, reporting, writeoffs
 from .db import Base, SessionLocal, engine
+from .forecasting import NotEnoughHistory
 from .models import Category
 from .seed import seed
 
@@ -29,6 +32,7 @@ async def lifespan(app: FastAPI):
     _check_schema()
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
+        runtime.apply(db)  # an imported dataset carries its own as-of date, currency and fiscal year
         if db.scalar(select(Category.id).limit(1)) is None:
             seed(db)
     yield
@@ -37,10 +41,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Pro-sight API",
     version="0.1.0",
-    description="Procurement FP&A backend: ERP connectors, financials, inventory, planning, "
+    description="Procurement FP&A backend: ERP connectors and Excel/CSV import, financials, inventory, planning, "
     "LightGBM-driven PO recommendations, and admin-approved decisions posted to the account book of record.",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(NotEnoughHistory)
+async def not_enough_history(request: Request, exc: NotEnoughHistory):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.get("/api/health", tags=["meta"])
@@ -53,3 +62,4 @@ app.include_router(actions.router, prefix="/api")
 app.include_router(planning.router, prefix="/api")
 app.include_router(recommendations.router, prefix="/api")
 app.include_router(writeoffs.router, prefix="/api")
+app.include_router(imports.router, prefix="/api")

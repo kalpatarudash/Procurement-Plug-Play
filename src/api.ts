@@ -268,14 +268,50 @@ export type RecommendationRun = {
 export type SkuInfo = { id: number; code: string; name: string; category: string; vendor: string; unit_cost: number; on_hand: number }
 export type VendorInfo = { id: number; name: string; price_index: number; lead_time_days: number; on_time_rate: number; kg_co2e_per_usd: number }
 
+export type ImportReport = {
+  ok: boolean
+  imported: boolean
+  errors: { sheet: string; row: number | null; column: string | null; message: string }[]
+  error_count: number
+  warnings: string[]
+  summary: {
+    vendors: number
+    skus: number
+    categories: number
+    inventory_lots: number
+    inventory_units: number
+    inventory_value: number
+    sales_rows: number
+    sales_weeks: number
+    sales_from: string | null
+    sales_to: string | null
+    revenue: number
+    expense_months: number
+    purchase_orders: number
+    open_purchase_orders: number
+    energy_months: number
+    as_of: string | null
+    currency: string
+    fiscal_year_start_month: number
+  }
+}
+
+export type DatasetInfo = { source: 'demo' | 'import'; as_of: string; currency: string; fiscal_year_start_month: number }
+
 export class ApiError extends Error {}
+
+/** Absolute URL of an API path, for links such as file downloads. */
+export function apiUrl(path: string) {
+  return `${API_BASE}/api${path}`
+}
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
-    res = await fetch(`${API_BASE}/api${path}`, {
+    res = await fetch(apiUrl(path), {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+      // JSON bodies are strings; FormData (file uploads) must set its own multipart header.
+      headers: typeof init?.body === 'string' ? { 'Content-Type': 'application/json', ...init?.headers } : init?.headers,
     })
   } catch {
     throw new ApiError('Can’t reach the Pro-sight API. Is the backend running?')

@@ -18,6 +18,27 @@ refuses to start on an out-of-date database and says so). Run tests with `uv run
 
 LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 
+## Your own data (Excel / CSV)
+
+The demo dataset is synthetic (`seed.py`). To use real data, open the Inventory or Financials tab →
+**Upload CSV or Excel**, or call the API directly:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/import/template.xlsx` | Blank template with example rows and an Instructions sheet (`?sample=true` fills it with the current data) |
+| `GET /api/import/template.zip` | The same as one CSV per sheet |
+| `POST /api/import/validate` | Check an upload (one `.xlsx`, or `.csv` files named after the sheets); changes nothing |
+| `POST /api/import` | Validate, then replace the dataset if there are no errors |
+| `POST /api/import/reset-demo` | Restore the synthetic demo data |
+| `GET /api/dataset` | Whether demo or imported data is loaded, its as-of date, currency and fiscal-year start |
+
+Sheets: Vendors, SKUs, Inventory, Sales, Expenses (required); Purchase orders, Energy, Settings
+(optional). Column definitions live in `importer.TABLES` and are written into the template's
+Instructions sheet. Sales may be daily or weekly and are summed into Monday-start weeks; the
+dataset's as-of date becomes the Monday after the last week. Forecast-based recommendations need
+at least 25 weeks of sales. Importing replaces products, stock, sales, expenses, POs, energy,
+decisions, the built-in ledger and FY targets.
+
 ## Layout
 
 | Path | What it does |
@@ -34,6 +55,8 @@ LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 | `forecasting.py` | LightGBM weekly demand forecast per SKU, backtested against a naive baseline |
 | `recommendations.py` | Reorder timing, quantity and vendor choice per SKU; creates pending PO decisions |
 | `writeoffs.py` | Aging stock: hold vs. markdown cash comparison; raises write-off and markdown decisions |
+| `importer.py` | Excel/CSV templates, upload validation (row-level errors), and dataset replacement |
+| `runtime.py` | As-of date, currency and fiscal-year start that an import overrides |
 | `seed.py` | Deterministic synthetic dataset (2 years of weekly sales, stock lots, PO history) |
 
 ## Accounting treatment on approval

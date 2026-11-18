@@ -48,6 +48,10 @@ PARAMS = {
 ROUNDS = 400
 
 
+class NotEnoughHistory(ValueError):
+    """Raised when the dataset is too short to train and backtest the model."""
+
+
 @dataclass
 class SkuForecast:
     sku_id: int
@@ -122,7 +126,10 @@ def train_and_forecast(db: Session) -> ForecastResult:
     n_weeks = units.shape[1]
     horizons = range(1, HORIZON + 1)
     if n_weeks < MIN_HISTORY + BACKTEST_WEEKS + 1:
-        raise ValueError("Not enough sales history to train the forecast model.")
+        raise NotEnoughHistory(
+            f"The forecast needs at least {MIN_HISTORY + BACKTEST_WEEKS + 1} weeks of sales history; "
+            f"this dataset has {n_weeks}. Upload more sales to get recommendations."
+        )
 
     # --- Backtest: train on data up to the cutoff, score the following BACKTEST_WEEKS weeks.
     cutoff = n_weeks - 1 - BACKTEST_WEEKS

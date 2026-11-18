@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Decision, type Emissions, type Financials, type Inventory, type Period, type PlanResponse, type RecommendationRun, type SkuInfo, type VendorInfo, type WriteOffRun } from './api'
+import { api, apiUrl, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Decision, type Emissions, type Financials, type Inventory, type Period, type PlanResponse, type RecommendationRun, type SkuInfo, type VendorInfo, type WriteOffRun, type ImportReport, type DatasetInfo } from './api'
 
 type IconName =
   | 'grid'
@@ -91,7 +91,18 @@ function RevenueChart({ months, asOf }: { months: { month: string; revenue: numb
   )
 }
 
-function Overview({ setTab, period, pending }: { setTab: (tab: Tab) => void; period: Period; pending: Decision[] | null }) {
+/** Fiscal years are named by the calendar year they end in (FY 2026 = Jul 2025–Jun 2026 when they start in July). */
+function fiscalLabels(asOf: string, startMonth: number) {
+  const [y, m] = asOf.split('-').map(Number)
+  const startYear = m >= startMonth ? y : y - 1
+  const currentFy = startMonth === 1 ? startYear : startYear + 1
+  const monthsIn = (y - startYear) * 12 + m - startMonth
+  return { currentFy, planFy: currentFy + 1, quarter: Math.floor(monthsIn / 3) + 1 }
+}
+
+type Fiscal = ReturnType<typeof fiscalLabels>
+
+function Overview({ setTab, period, pending, fiscal }: { setTab: (tab: Tab) => void; period: Period; pending: Decision[] | null; fiscal: Fiscal | null }) {
   const fin = useApi<Financials>(`/financials?${periodQuery(period)}`)
   const ytd = useApi<Financials>('/financials?view=YTD')
   const inv = useApi<Inventory>('/inventory')
@@ -104,7 +115,6 @@ function Overview({ setTab, period, pending }: { setTab: (tab: Tab) => void; per
   const c = fin.data.current
   const [y, m, d] = inv.data.as_of.split('-').map(Number)
   const today = new Date(y, m - 1, d)
-  const planYear = m >= 7 ? y + 2 : y + 1 // fiscal years start in July and are named by the year they end
   const committed = openPos.data.reduce((sum, po) => sum + po.amount, 0)
   const actions = [...(pending ?? [])].sort((a, b) => b.impact_usd - a.impact_usd)
   const impact = actions.reduce((sum, a) => sum + a.impact_usd, 0)
@@ -120,7 +130,7 @@ function Overview({ setTab, period, pending }: { setTab: (tab: Tab) => void; per
           <h1>Good morning, {CURRENT_USER.split(' ')[0]}.</h1>
           <p>Here’s what needs your attention across procurement and finance.</p>
         </div>
-        <button className="primary-button" onClick={() => setTab('budget')}>Plan FY {planYear} <Icon name="arrow" /></button>
+        {fiscal && <button className="primary-button" onClick={() => setTab('budget')}>Plan FY {fiscal.planFy} <Icon name="arrow" /></button>}
       </section>
 
       <section className="metrics-grid">
@@ -628,8 +638,108 @@ function LoadState({ error, onRetry }: { error: string | null; onRetry: () => vo
   return (
     <section className="panel load-state">
       {error
-        ? <><Icon name="alert" /><div><strong>{error}</strong><p>Start it with <code>cd backend && uv run uvicorn prosight.main:app --reload</code></p></div><button className="secondary-button" onClick={onRetry}>Retry</button></>
+        ? <><Icon name="alert" /><div><strong>{error}</strong>{error.includes('reach the Pro-sight API') && <p>Start it with <code>cd backend && uv run uvicorn prosight.main:app --reload</code></p>}</div><button className="secondary-button" onClick={onRetry}>Retry</button></>
         : <p>Loading…</p>}
+    </section>
+  )
+}
+
+const SUMMARY_FIELDS: [keyof ImportReport['summary'], string, (v: never) => string][] = [
+  ['skus', 'SKUs', (v: number) => v.toLocaleString()],
+  ['vendors', 'Vendors', (v: number) => v.toLocaleString()],
+  ['inventory_value', 'Inventory value', (v: number) => formatMoney(v)],
+  ['sales_weeks', 'Weeks of sales', (v: number) => v.toLocaleString()],
+  ['revenue', 'Revenue in file', (v: number) => formatMoney(v)],
+  ['purchase_orders', 'Purchase orders', (v: number) => v.toLocaleString()],
+  ['expense_months', 'Expense months', (v: number) => v.toLocaleString()],
+  ['as_of', 'Data as of', (v: string | null) => (v ? formatDate(v) : '—')],
+]
+
+function ImportPanel() {
+  const { data: dataset } = useApi<DatasetInfo>('/dataset')
+  const [files, setFiles] = useState<File[]>([])
+  const [report, setReport] = useState<ImportReport | null>(null)
+  const [busy, setBusy] = useState<'check' | 'import' | 'reset' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState<string | null>(null)
+
+  const send = async (path: string) => {
+    const form = new FormData()
+    files.forEach(f => form.append('files', f))
+    return api<ImportReport>(path, { method: 'POST', body: form })
+  }
+  const run = async (kind: 'check' | 'import' | 'reset') => {
+    if (kind === 'import' && !window.confirm('Importing replaces all current inventory, sales, financials, purchase orders, decisions and ledger entries. Continue?')) return
+    if (kind === 'reset' && !window.confirm('Restore the demo data? Your imported data, decisions and ledger entries will be removed.')) return
+    setBusy(kind)
+    setError(null)
+    try {
+      if (kind === 'check') setReport(await send('/import/validate'))
+      else {
+        if (kind === 'import') setReport(await send('/import'))
+        else await api<DatasetInfo>('/import/reset-demo', { method: 'POST' })
+        setDone(kind === 'import' ? 'Imported. Reloading with your data…' : 'Demo data restored. Reloading…')
+        setTimeout(() => window.location.reload(), 900)
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="panel import-panel">
+      <div className="connector-heading">
+        <div><span className="eyebrow">BRING YOUR OWN DATA</span><h2>Upload CSV or Excel</h2><p>Load your own inventory, sales and financials from a spreadsheet instead of an ERP connection.</p></div>
+        {dataset && <span className={`dataset-badge ${dataset.source}`}>{dataset.source === 'demo' ? 'Using demo data' : `Using your data · as of ${formatDate(dataset.as_of)}`}</span>}
+      </div>
+      <div className="import-steps">
+        <div>
+          <b>1</b><strong>Download the template</strong>
+          <p>One sheet per table, with an Instructions sheet explaining every column.</p>
+          <div className="import-links">
+            <a className="secondary-button" href={apiUrl('/import/template.xlsx')} download>Excel template</a>
+            <a className="text-button" href={apiUrl('/import/template.xlsx?sample=true')} download>Excel with current data</a>
+            <a className="text-button" href={apiUrl('/import/template.zip')} download>CSV templates (.zip)</a>
+          </div>
+        </div>
+        <div>
+          <b>2</b><strong>Choose your file</strong>
+          <p>One .xlsx workbook, or several .csv files named after the sheets (sales.csv, skus.csv…).</p>
+          <label className="file-pick">
+            <input type="file" multiple accept=".xlsx,.csv" onChange={e => { setFiles(Array.from(e.target.files ?? [])); setReport(null); setDone(null) }} />
+            <span>{files.length ? files.map(f => f.name).join(', ') : 'Choose .xlsx or .csv files'}</span>
+          </label>
+          <button className="secondary-button" disabled={!files.length || busy !== null} onClick={() => run('check')}>{busy === 'check' ? 'Checking…' : 'Check file'}</button>
+        </div>
+        <div>
+          <b>3</b><strong>Import</strong>
+          <p>Only possible once the check finds no errors. Replaces the current data.</p>
+          <button className="primary-button" disabled={!report?.ok || report.imported || busy !== null} onClick={() => run('import')}>{busy === 'import' ? 'Importing…' : 'Import data'}</button>
+        </div>
+      </div>
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      {done && <p className="decision-notice" role="status"><Icon name="check" size={14} /> {done}</p>}
+      {report && (
+        <div className="import-report">
+          <p className={report.ok ? 'report-ok' : 'report-bad'}>
+            {report.ok ? (report.imported ? 'Imported successfully.' : 'No errors found. Ready to import.') : `${report.error_count.toLocaleString()} problem${report.error_count === 1 ? '' : 's'} to fix before importing:`}
+          </p>
+          <div className="import-summary">
+            {SUMMARY_FIELDS.map(([key, label, fmt]) => <div key={key}><small>{label}</small><strong>{(fmt as (v: unknown) => string)(report.summary[key])}</strong></div>)}
+          </div>
+          {report.warnings.map(w => <p className="import-warning" key={w}><Icon name="alert" size={13} /> {w}</p>)}
+          {report.errors.length > 0 && (
+            <div className="import-errors">
+              <div className="import-error-head"><span>Sheet</span><span>Row</span><span>Column</span><span>Problem</span></div>
+              {report.errors.map((e, i) => <div className="import-error-row" key={i}><span>{e.sheet}</span><span>{e.row ?? '—'}</span><span>{e.column ?? '—'}</span><span>{e.message}</span></div>)}
+              {report.error_count > report.errors.length && <p className="import-warning">…and {(report.error_count - report.errors.length).toLocaleString()} more.</p>}
+            </div>
+          )}
+        </div>
+      )}
+      {dataset?.source === 'import' && <button className="text-button restore-demo" disabled={busy !== null} onClick={() => run('reset')}>Restore demo data</button>}
     </section>
   )
 }
@@ -714,6 +824,7 @@ function InventoryPage() {
         </section>
       )}
       <Connectors />
+      <ImportPanel />
       {data && (
         <section className="panel statement-panel">
           <div className="panel-heading"><div><span className="eyebrow">CATEGORY PERFORMANCE</span><h2>Capital by category</h2></div><span className="period-note">As of {formatDate(data.as_of)}</span></div>
@@ -759,6 +870,7 @@ function DetailPage({ type, period }: { type: 'inventory' | 'financials'; period
       <section className="hero compact"><div><span className="eyebrow">{financial ? 'FINANCIAL STATEMENTS' : 'CONNECTED INVENTORY'}</span><h1>{financial ? 'Financial performance.' : 'Inventory at a glance.'}</h1><p>{financial ? 'A clear view of profitability, cost, and growth.' : 'Stock position, movement, and capital efficiency.'}</p></div><button className="secondary-button">Export report</button></section>
       {financial ? <FinancialsPage period={period} /> : <InventoryPage />}
       {financial && <CarbonPanel period={period} />}
+      {financial && <ImportPanel />}
     </>
   )
 }
@@ -785,6 +897,8 @@ export default function App() {
   // Run the models once on load so the latest recommendations are waiting for approval.
   useEffect(() => { refreshModels().catch(() => reloadPending()) }, [refreshModels, reloadPending])
   const pendingCount = pending?.length
+  const { data: dataset } = useApi<DatasetInfo>('/dataset')
+  const fiscal = dataset ? fiscalLabels(dataset.as_of, dataset.fiscal_year_start_month) : null
   const [dateView, setDateView] = useState('YTD')
   const [customDates, setCustomDates] = useState(false)
   const [appliedRange, setAppliedRange] = useState<{ from: string; to: string } | null>(null)
@@ -802,7 +916,7 @@ export default function App() {
         <div className="sidebar-footer"><div className="support"><Icon name="spark" /><div><strong>Need support?</strong><span>Ask your AI copilot</span></div></div><div className="profile"><span>OH</span><div><strong>Olivia Hayes</strong><small>Finance Lead</small></div><button aria-label="Profile options">•••</button></div></div>
       </aside>
       <main>
-        <header className="topbar"><div className="search"><Icon name="search" /><input placeholder="Search anything..." aria-label="Search" /></div><div><button className="icon-button" aria-label="Notifications"><Icon name="bell" /><i /></button><select className="period" defaultValue="FY 2025 · Q4" aria-label="Dashboard reporting period"><option>FY 2025 · Q4</option><option>FY 2024 · Q4</option><option>FY 2023 · Q4</option></select></div></header>
+        <header className="topbar"><div className="search"><Icon name="search" /><input placeholder="Search anything..." aria-label="Search" /></div><div><button className="icon-button" aria-label="Notifications"><Icon name="bell" /><i /></button>{fiscal && <span className="period" title={dataset ? `${dataset.source === 'import' ? 'Your data' : 'Demo data'}, as of ${formatDate(dataset.as_of)}` : undefined}>FY {fiscal.currentFy} · Q{fiscal.quarter}{dataset?.source === 'demo' ? ' · Demo' : ''}</span>}</div></header>
         <div className="date-toolbar">
           <div className="date-context"><span>Viewing</span><strong>{customDates ? (appliedRange ? `${formatDate(appliedRange.from)} – ${formatDate(appliedRange.to)}` : 'Custom date range') : dateView}</strong></div>
           <div className="date-options">
@@ -812,7 +926,7 @@ export default function App() {
           {customDates && <div className="custom-dates"><label>From<input type="date" value={draftRange.from} max={draftRange.to || undefined} aria-invalid={rangeInvalid} onChange={e => setDraftRange(r => ({ ...r, from: e.target.value }))} /></label><span>→</span><label>To<input type="date" value={draftRange.to} min={draftRange.from || undefined} aria-invalid={rangeInvalid} onChange={e => setDraftRange(r => ({ ...r, to: e.target.value }))} /></label><button disabled={rangeInvalid} onClick={() => setAppliedRange(draftRange)}>Apply</button></div>}
         </div>
         <div className="page">
-          {tab === 'overview' && <Overview setTab={setTab} period={period} pending={pending} />}
+          {tab === 'overview' && <Overview setTab={setTab} period={period} pending={pending} fiscal={fiscal} />}
           {tab === 'budget' && <Budget />}
           {tab === 'recommendations' && <Recommendations pending={pending} reloadPending={reloadPending} refreshModels={refreshModels} />}
           {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} period={period} />}
