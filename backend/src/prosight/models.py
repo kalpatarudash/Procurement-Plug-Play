@@ -177,6 +177,8 @@ class Decision(Base):
     impact_usd: Mapped[float] = mapped_column(default=0.0)
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual | model
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # Model evidence shown to the admin (forecast, vendor scoring, emissions). None for manual ones.
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime]
     decided_at: Mapped[datetime | None]
     decided_by: Mapped[str | None] = mapped_column(String(120))

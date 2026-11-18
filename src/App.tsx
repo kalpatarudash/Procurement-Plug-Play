@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Emissions, type Financials, type Inventory, type Period, type PlanResponse } from './api'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Decision, type Emissions, type Financials, type Inventory, type Period, type PlanResponse, type RecommendationRun, type SkuInfo, type VendorInfo } from './api'
 
 type IconName =
   | 'grid'
@@ -47,11 +47,6 @@ type Tab = (typeof nav)[number]['id']
 function toNumber(value: string, min = 0, max = Number.MAX_SAFE_INTEGER) {
   const n = Number(value)
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min
-}
-
-/** Format a value expressed in thousands, e.g. 780 -> "$780K", 1200 -> "$1.2M". */
-function formatK(k: number) {
-  return k >= 1000 ? `$${(k / 1000).toFixed(2).replace(/\.?0+$/, '')}M` : `$${k}K`
 }
 
 /** Format an ISO yyyy-mm-dd string in local time (avoids the UTC off-by-one of `new Date(iso)`). */
@@ -269,75 +264,271 @@ function Budget() {
   )
 }
 
-function Recommendations() {
-  const [approved, setApproved] = useState<string[]>([])
+const CONFIDENCE_CLASS: Record<string, string> = { High: 'c0', Medium: 'c1', Low: 'c2' }
+const SYSTEM_NAMES: Record<string, string> = { demo: 'Demo ERP', sap_s4hana: 'SAP S/4HANA', salesforce: 'Salesforce', oracle_netsuite: 'Oracle NetSuite' }
+const shortDate = (iso: string) => formatDate(iso).replace(/, \d{4}$/, '')
+
+function DecisionCard({ decision, rank, onChanged }: { decision: Decision; rank: number; onChanged: (d: Decision) => void }) {
+  const d = decision.details
+  const isPO = decision.kind === 'purchase_order'
+  const options = d?.vendor_options ?? []
   const [editing, setEditing] = useState(false)
-  const [requestOpen, setRequestOpen] = useState(false)
-  const [requestPlaced, setRequestPlaced] = useState(false)
-  const [firstTitle, setFirstTitle] = useState('Reduce Spring Outerwear order by 28%')
-  const [firstImpact, setFirstImpact] = useState(74)
-  const [amount, setAmount] = useState(50000)
-  // Stable ids are used as React keys so editing the title doesn't remount the card (and drop input focus).
-  const items = [
-    { id: 'outerwear', title: firstTitle, area: 'Procurement', impact: firstImpact, confidence: 'High', reason: 'Sales velocity has fallen for 6 consecutive weeks while weeks-of-cover reached 19.', credits: '1,240 credits' },
-    { id: 'accessories', title: 'Write off 34 aging accessory SKUs', area: 'Inventory', impact: 31, confidence: 'High', reason: 'These units are over 270 days old and carrying costs now exceed expected margin.', credits: null },
-    { id: 'northstar', title: 'Renegotiate terms with Northstar Textiles', area: 'Supplier', impact: 21, confidence: 'Medium', reason: 'On-time delivery is 96%, but current unit pricing is 7% above category benchmark.', credits: '860 credits' },
-  ]
-  const totalImpact = items.reduce((sum, item) => sum + item.impact, 0)
-  const approve = (id: string) => setApproved(prev => (prev.includes(id) ? prev : [...prev, id]))
-  const closeRequest = () => setRequestOpen(false)
+  const [quantity, setQuantity] = useState(decision.payload.quantity)
+  const [vendorId, setVendorId] = useState(decision.payload.vendor_id)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(decision.last_error)
+  const vendor = options.find(o => o.vendor_id === vendorId)
+  const unitCost = vendor?.unit_cost ?? decision.payload.unit_cost ?? 0
+  const amount = quantity * unitCost
+  const kg = vendor ? quantity * vendor.kg_co2e_per_unit : d?.kg_co2e
+  const edited = quantity !== decision.payload.quantity || vendorId !== decision.payload.vendor_id
+
+  const act = async (action: 'approve' | 'reject') => {
+    setBusy(true)
+    setError(null)
+    try {
+      const body = action === 'approve'
+        ? { approved_by: CURRENT_USER, ...(edited ? { quantity, vendor_id: isPO ? vendorId : undefined } : {}) }
+        : { rejected_by: CURRENT_USER }
+      onChanged(await api<Decision>(`/decisions/${decision.id}/${action}`, { method: 'POST', body: JSON.stringify(body) }))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <article className="panel recommendation">
+      <div className="rec-rank">{String(rank).padStart(2, '0')}</div>
+      <div className="rec-copy">
+        <div>
+          <span className="eyebrow">{isPO ? 'PROCUREMENT' : 'INVENTORY'}{decision.source === 'manual' && ' · MANUAL'}</span>
+          {d && <span className={`confidence ${CONFIDENCE_CLASS[d.confidence]}`}>{d.confidence} confidence</span>}
+          {isPO && kg !== undefined && <span className="carbon-credit">{Math.round(kg).toLocaleString()} kg CO₂e</span>}
+        </div>
+        <h2>{decision.title}</h2>
+        <p>{decision.reason}</p>
+        {d && <p className="rec-meta">{[d.order_by && `Order by ${shortDate(d.order_by)}`, d.stockout_date && `stockout ~${shortDate(d.stockout_date)}`, `${d.on_hand.toLocaleString()} on hand`, `${d.on_order.toLocaleString()} on order`].filter(Boolean).join(' · ')}</p>}
+        {editing && (
+          <div className="rec-edit">
+            <label>Quantity<input type="number" min="1" value={quantity} onChange={e => setQuantity(toNumber(e.target.value, 1))} /></label>
+            {isPO && options.length > 0 && (
+              <label>Vendor<select value={vendorId} onChange={e => setVendorId(Number(e.target.value))}>
+                {options.map((o, i) => <option key={o.vendor_id} value={o.vendor_id}>{o.name} · ${o.unit_cost.toFixed(2)} · {o.lead_weeks} wk · {o.kg_co2e_per_unit.toFixed(2)} kg/unit{i === 0 ? ' (recommended)' : ''}{o.arrives_before_stockout ? '' : ' · late'}</option>)}
+              </select></label>
+            )}
+          </div>
+        )}
+        {error && <p className="inline-error" role="alert">{error}</p>}
+      </div>
+      <div className="rec-impact">
+        <small>{isPO ? 'ORDER VALUE' : 'EST. IMPACT'}</small><strong>{formatMoney(isPO ? amount : decision.impact_usd)}</strong>
+        {isPO && decision.impact_usd > 0 && <small className="rec-protects">protects {formatMoney(decision.impact_usd)} margin</small>}
+        <div className="rec-actions">
+          <button className="edit-button" disabled={busy} onClick={() => setEditing(!editing)}>{editing ? 'Done' : 'Edit'}</button>
+          <button className="edit-button" disabled={busy} onClick={() => act('reject')}>Reject</button>
+          <button disabled={busy || quantity <= 0} onClick={() => act('approve')}>{busy ? 'Posting…' : isPO ? 'Place order' : 'Approve'} <Icon name="arrow" size={16} /></button>
+        </div>
+      </div>
+    </article>
+  )
+}
+
+function RaiseRequestModal({ run, onClose, onCreated }: { run: RecommendationRun | null; onClose: () => void; onCreated: () => void }) {
+  const { data: skus } = useApi<SkuInfo[]>('/inventory/skus')
+  const { data: vendors } = useApi<VendorInfo[]>('/vendors')
+  const [skuId, setSkuId] = useState<number | null>(null)
+  const [vendorId, setVendorId] = useState<number | null>(null)
+  const [quantity, setQuantity] = useState(100)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [placed, setPlaced] = useState<Decision | null>(null)
 
   useEffect(() => {
-    if (!requestOpen) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRequestOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [requestOpen])
+  }, [onClose])
+
+  const sku = skus?.find(s => s.id === (skuId ?? skus[0]?.id))
+  const plan = run?.plans.find(p => p.sku_id === sku?.id)
+  const vendor = vendors?.find(v => v.id === (vendorId ?? vendors.find(x => x.name === (plan?.vendor?.name ?? sku?.vendor))?.id))
+  const unitCost = sku && vendor ? Math.round(sku.unit_cost * vendor.price_index * 100) / 100 : 0
+  const submit = async () => {
+    if (!sku || !vendor) return
+    setBusy(true)
+    setError(null)
+    try {
+      setPlaced(await api<Decision>('/decisions', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'purchase_order',
+          title: `Order ${quantity.toLocaleString()} × ${sku.name} from ${vendor.name}`,
+          reason: `Raised manually by ${CURRENT_USER}.`,
+          payload: { sku_id: sku.id, vendor_id: vendor.id, quantity, unit_cost: unitCost },
+        }),
+      }))
+      onCreated()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="request-modal" role="dialog" aria-modal="true" aria-labelledby="request-title" onMouseDown={e => e.stopPropagation()}>
+        {placed ? (
+          <div className="request-success"><span><Icon name="check" size={26} /></span><h2 id="request-title">Purchase request raised</h2><p>{placed.title} ({formatMoney(quantity * unitCost)}) is waiting for approval in Decisions.</p><button className="primary-button" onClick={onClose}>Done</button></div>
+        ) : (
+          <>
+            <div className="request-heading"><div><span className="eyebrow">NEW PURCHASE REQUEST</span><h2 id="request-title">Raise a custom PR</h2></div><button onClick={onClose} aria-label="Close">×</button></div>
+            {!skus || !vendors ? <p>Loading…</p> : (
+              <>
+                <label className="form-field">SKU<select value={sku?.id} onChange={e => { setSkuId(Number(e.target.value)); setVendorId(null) }}>
+                  {skus.map(s => <option key={s.id} value={s.id}>{s.category} · {s.name} ({s.code})</option>)}
+                </select></label>
+                <label className="form-field">Quantity<span className="amount-field"><input type="number" min="1" value={quantity} onChange={e => setQuantity(toNumber(e.target.value, 1))} /><span>units</span></span></label>
+                <label className="form-field">Supplier<select value={vendor?.id} onChange={e => setVendorId(Number(e.target.value))}>
+                  {vendors.map(v => <option key={v.id} value={v.id}>{v.name} · {Math.round(v.on_time_rate * 100)}% on time · {v.kg_co2e_per_usd.toFixed(3)} kg CO₂e/$</option>)}
+                </select></label>
+                <div className="pr-insight"><Icon name="spark" /><div>
+                  <strong>Pro-sight recommendation</strong>
+                  <p>{!plan ? 'No forecast for this SKU.'
+                    : plan.quantity > 0 ? <>The demand model suggests <b>{plan.quantity.toLocaleString()} units from {plan.vendor?.name}</b>{plan.order_by ? ` by ${shortDate(plan.order_by)}` : ''}. {plan.reason}</>
+                    : <>{plan.reason}</>}</p>
+                  {vendor && <p className="credit-note">This order: <b>{formatMoney(quantity * unitCost)}</b> at ${unitCost.toFixed(2)}/unit, about <b>{Math.round(quantity * unitCost * vendor.kg_co2e_per_usd).toLocaleString()} kg CO₂e</b>.</p>}
+                </div></div>
+                {error && <p className="inline-error" role="alert">{error}</p>}
+                <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || quantity <= 0} onClick={submit}>Raise PR <Icon name="arrow" /></button></div>
+              </>
+            )}
+          </>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function Recommendations({ onPendingChange }: { onPendingChange: (count: number) => void }) {
+  const pending = useApi<Decision[]>('/decisions?status=pending')
+  const approved = useApi<Decision[]>('/decisions?status=approved')
+  const [run, setRun] = useState<RecommendationRun | null>(null)
+  const [runError, setRunError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [requestOpen, setRequestOpen] = useState(false)
+  const [raising, setRaising] = useState<number | null>(null)
+  const reloadPending = pending.reload
+  const reloadApproved = approved.reload
+
+  const refresh = useCallback(async (announce: boolean) => {
+    setRefreshing(true)
+    setRunError(null)
+    try {
+      const result = await api<{ created: number; run: RecommendationRun }>('/recommendations/refresh', { method: 'POST' })
+      setRun(result.run)
+      if (announce) setNotice(`Model re-run: ${result.created} order${result.created === 1 ? '' : 's'} recommended now.`)
+      reloadPending()
+    } catch (e) {
+      setRunError((e as Error).message)
+    } finally {
+      setRefreshing(false)
+    }
+  }, [reloadPending])
+
+  useEffect(() => { refresh(false) }, [refresh])
+  useEffect(() => { if (pending.data) onPendingChange(pending.data.length) }, [pending.data, onPendingChange])
+
+  const onChanged = (updated: Decision) => {
+    if (updated.status === 'approved' && updated.purchase_order) {
+      const po = updated.purchase_order
+      setNotice(`${po.number} sent to ${SYSTEM_NAMES[po.external_system ?? ''] ?? po.external_system}; ${updated.journal_entry?.number} posted to the book of record.`)
+    } else if (updated.status === 'approved') {
+      setNotice(`Approved; ${updated.journal_entry?.number} posted to the book of record.`)
+    } else {
+      setNotice(`Rejected: ${updated.title}`)
+    }
+    reloadPending()
+    reloadApproved()
+    refresh(false)
+  }
+
+  const raiseEarly = async (skuId: number) => {
+    setRaising(skuId)
+    try {
+      await api<Decision>(`/recommendations/${skuId}/raise`, { method: 'POST' })
+      reloadPending()
+    } catch (e) {
+      setNotice((e as Error).message)
+    } finally {
+      setRaising(null)
+    }
+  }
+
+  const items = pending.data ?? []
+  const totalImpact = items.reduce((sum, d) => sum + d.impact_usd, 0)
+  const pendingSkus = new Set(items.map(d => d.payload.sku_id))
+  const upcoming = run?.plans.filter(p => p.status === 'upcoming') ?? []
+  const fc = run?.forecast
+  const gap = run?.plan_alignment.gap_pct
 
   return (
     <>
-      <section className="hero compact"><div><span className="eyebrow">AGENTIC INSIGHTS</span><h1>Actions, not just answers.</h1><p>Recommendations ranked by financial impact and urgency.</p></div><div className="hero-actions"><div className="impact-pill"><Icon name="spark" /> {formatK(totalImpact)} potential impact</div><button className="primary-button" onClick={() => { setRequestOpen(true); setRequestPlaced(false) }}>+ Raise purchase request</button></div></section>
-      <div className="recommendation-list">
-        {items.map((item, i) => {
-          const isApproved = approved.includes(item.id)
-          return (
-            <article className={`panel recommendation ${isApproved ? 'approved' : ''}`} key={item.id}>
-              <div className="rec-rank">{String(i + 1).padStart(2, '0')}</div>
-              <div className="rec-copy">
-                <div><span className="eyebrow">{item.area}</span><span className={`confidence c${i}`}>{item.confidence} confidence</span>{item.credits && <span className="carbon-credit">− CO₂ · {item.credits}</span>}</div>
-                {i === 0 && editing
-                  ? <><input className="edit-title" aria-label="Recommendation title" value={firstTitle} onChange={e => setFirstTitle(e.target.value)} /><label className="edit-impact">Estimated impact ($K)<input type="number" min="0" value={firstImpact} onChange={e => setFirstImpact(toNumber(e.target.value))} /></label></>
-                  : <h2>{item.title}</h2>}
-                <p>{item.reason}</p>
-              </div>
-              <div className="rec-impact">
-                <small>EST. IMPACT</small><strong>{formatK(item.impact)}</strong>
-                {i === 0
-                  ? <div className="rec-actions"><button className="edit-button" disabled={isApproved || (editing && !firstTitle.trim())} onClick={() => { if (editing) setFirstTitle(firstTitle.trim()); setEditing(!editing) }}>{editing ? 'Save changes' : 'Edit'}</button><button disabled={isApproved || editing} onClick={() => approve(item.id)}>{isApproved ? 'Order placed' : 'Place order'} <Icon name={isApproved ? 'check' : 'arrow'} size={16} /></button></div>
-                  : <button disabled={isApproved} onClick={() => approve(item.id)}>{isApproved ? 'Approved' : 'Approve action'} <Icon name={isApproved ? 'check' : 'arrow'} size={16} /></button>}
-              </div>
-            </article>
-          )
-        })}
-      </div>
-      {requestOpen && (
-        <div className="modal-backdrop" onMouseDown={closeRequest}>
-          <section className="request-modal" role="dialog" aria-modal="true" aria-labelledby="request-title" onMouseDown={e => e.stopPropagation()}>
-            {requestPlaced ? (
-              <div className="request-success"><span><Icon name="check" size={26} /></span><h2 id="request-title">Purchase request raised</h2><p>PR-2025-048 for ${amount.toLocaleString()} has been sent to Finance for approval.</p><button className="primary-button" onClick={closeRequest}>Done</button></div>
-            ) : (
-              <>
-                <div className="request-heading"><div><span className="eyebrow">NEW PURCHASE REQUEST</span><h2 id="request-title">Raise a custom PR</h2></div><button onClick={closeRequest} aria-label="Close">×</button></div>
-                <label className="form-field">Purchase category<select defaultValue="Spring Outerwear"><option>Spring Outerwear</option><option>Classic Footwear</option><option>Accessories</option></select></label>
-                <label className="form-field">Requested amount<span className="amount-field"><span>$</span><input type="number" min="0" step="100" value={amount} onChange={e => setAmount(toNumber(e.target.value))} /></span></label>
-                <label className="form-field">Preferred supplier<select defaultValue="Northstar Textiles"><option>Northstar Textiles</option><option>Evergreen Manufacturing</option><option>Atlas Apparel Co.</option></select></label>
-                <div className="pr-insight"><Icon name="spark" /><div><strong>Pro-sight recommendation</strong><p>Northstar Textiles is the best fit with a 96% on-time rating. Based on forecast demand, keep this PR between <b>$42,000–$58,000</b>{amount > 58000 ? ' — your current amount may create 4.5 weeks of excess stock.' : amount < 42000 ? ' — your current amount may lead to stockouts.' : ' to maintain healthy stock cover.'}</p><p className="credit-note"><b>Lower-emission option:</b> Evergreen Manufacturing emits 18% less CO₂ and could earn approximately <b>{Math.round(amount / 120).toLocaleString()} carbon credits</b> on this order.</p></div></div>
-                <div className="modal-actions"><button className="secondary-button" onClick={closeRequest}>Cancel</button><button className="primary-button" disabled={amount <= 0} onClick={() => setRequestPlaced(true)}>Raise PR <Icon name="arrow" /></button></div>
-              </>
-            )}
-          </section>
+      <section className="hero compact">
+        <div><span className="eyebrow">AGENTIC INSIGHTS</span><h1>Actions, not just answers.</h1><p>Purchase orders from the demand forecast, ranked by margin at risk. Approved orders post to your book of record.</p></div>
+        <div className="hero-actions">
+          <div className="impact-pill"><Icon name="spark" /> {formatMoney(totalImpact)} margin protected</div>
+          <button className="secondary-button" disabled={refreshing} onClick={() => refresh(true)}>{refreshing ? 'Running model…' : 'Re-run model'}</button>
+          <button className="primary-button" onClick={() => setRequestOpen(true)}>+ Raise purchase request</button>
+        </div>
+      </section>
+      {notice && <p className="decision-notice" role="status"><Icon name="check" size={14} /> {notice}</p>}
+      {runError && <LoadState error={runError} onRetry={() => refresh(false)} />}
+      {!pending.data ? <LoadState error={pending.error} onRetry={pending.reload} /> : (
+        <div className="recommendation-list">
+          {items.length === 0 && <section className="panel empty-state">No decisions waiting. The model will raise orders as stock approaches its reorder point.</section>}
+          {items.map((d, i) => <DecisionCard key={d.id} decision={d} rank={i + 1} onChanged={onChanged} />)}
         </div>
       )}
+      {upcoming.length > 0 && (
+        <section className="panel upcoming-panel">
+          <div className="panel-heading"><div><span className="eyebrow">COMING UP</span><h2>Reorders due in the next 4 weeks</h2></div></div>
+          <div className="upcoming-head"><span>SKU</span><span>Order by</span><span>Stockout</span><span>If ordered today</span><span /></div>
+          {upcoming.map(p => (
+            <div className="upcoming-row" key={p.sku_id}>
+              <span><strong>{p.sku_name}</strong><small>{p.category} · {p.on_hand.toLocaleString()} on hand</small></span>
+              <span>{p.order_by ? shortDate(p.order_by) : '—'}</span>
+              <span>{p.stockout_date ? shortDate(p.stockout_date) : '—'}</span>
+              <span>{p.quantity > 0 ? `${p.quantity.toLocaleString()} from ${p.vendor?.name} · ${formatMoney(p.amount)}` : 'Covered by open POs'}</span>
+              <span>{pendingSkus.has(p.sku_id) ? <em>Pending</em> : p.quantity > 0 && <button className="text-button" disabled={raising === p.sku_id} onClick={() => raiseEarly(p.sku_id)}>Raise now <Icon name="arrow" size={13} /></button>}</span>
+            </div>
+          ))}
+        </section>
+      )}
+      {(approved.data?.length ?? 0) > 0 && (
+        <section className="panel upcoming-panel">
+          <div className="panel-heading"><div><span className="eyebrow">POSTED</span><h2>Recently approved</h2></div></div>
+          {approved.data!.slice(0, 6).map(d => (
+            <div className="posted-row" key={d.id}>
+              <span><strong>{d.title}</strong><small>Approved by {d.decided_by}</small></span>
+              <span>{d.purchase_order && <>{d.purchase_order.number} · {SYSTEM_NAMES[d.purchase_order.external_system ?? ''] ?? d.purchase_order.external_system}</>}</span>
+              <span>{d.journal_entry && <>{d.journal_entry.number} · {d.journal_entry.ledger === 'memo' ? 'commitment' : 'GL'} · {SYSTEM_NAMES[d.journal_entry.posted_to] ?? d.journal_entry.posted_to}</>}</span>
+            </div>
+          ))}
+        </section>
+      )}
+      {run && fc && (
+        <p className="source-note">
+          {fc.model}: {formatPct(fc.backtest_wape)} weekly error vs {formatPct(fc.naive_wape)} for a naive forecast over a {fc.backtest_weeks}-week backtest.
+          {' '}Vendor scoring weights: cost {formatPct(run.weights.cost, 0)}, reliability {formatPct(run.weights.reliability, 0)}, lead time {formatPct(run.weights.lead_time, 0)}, emissions {formatPct(run.weights.emissions, 0)}
+          {run.emission_pressure > 0 ? ` (raised because the FY plan is ${formatPct(run.emission_pressure, 0)} off its emissions target)` : ''}.
+          {gap !== null && gap !== undefined && ` Forecast demand is ${formatPct(Math.abs(gap), 0)} ${gap < 0 ? 'below' : 'above'} the revenue plan for the ${run.plan_alignment.weeks_compared} overlapping weeks.`}
+        </p>
+      )}
+      {requestOpen && <RaiseRequestModal run={run} onClose={() => setRequestOpen(false)} onCreated={() => reloadPending()} />}
     </>
   )
 }
@@ -483,6 +674,10 @@ function DetailPage({ type, period }: { type: 'inventory' | 'financials'; period
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('overview')
+  const [pendingCount, setPendingCount] = useState<number | null>(null)
+  useEffect(() => {
+    api<Decision[]>('/decisions?status=pending').then(d => setPendingCount(d.length)).catch(() => setPendingCount(null))
+  }, [])
   const [dateView, setDateView] = useState('YTD')
   const [customDates, setCustomDates] = useState(false)
   const [appliedRange, setAppliedRange] = useState<{ from: string; to: string } | null>(null)
@@ -494,7 +689,7 @@ export default function App() {
         <div className="brand"><span>P</span><strong>Pro-sight</strong></div>
         <nav>
           <small>WORKSPACE</small>
-          {nav.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'recommendations' && <b>3</b>}</button>)}
+          {nav.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'recommendations' && pendingCount ? <b>{pendingCount}</b> : null}</button>)}
         </nav>
         <div className="sidebar-footer"><div className="support"><Icon name="spark" /><div><strong>Need support?</strong><span>Ask your AI copilot</span></div></div><div className="profile"><span>OH</span><div><strong>Olivia Hayes</strong><small>Finance Lead</small></div><button aria-label="Profile options">•••</button></div></div>
       </aside>
@@ -511,7 +706,7 @@ export default function App() {
         <div className="page">
           {tab === 'overview' && <Overview setTab={setTab} />}
           {tab === 'budget' && <Budget />}
-          {tab === 'recommendations' && <Recommendations />}
+          {tab === 'recommendations' && <Recommendations onPendingChange={setPendingCount} />}
           {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} period={customDates && appliedRange ? { start: appliedRange.from, end: appliedRange.to } : { view: dateView as 'YTD' | 'QTD' | 'MTD' }} />}
         </div>
       </main>

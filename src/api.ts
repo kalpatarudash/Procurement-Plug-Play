@@ -140,6 +140,90 @@ export type PlanResponse = {
   }
 }
 
+export type VendorOption = {
+  vendor_id: number
+  name: string
+  unit_cost: number
+  lead_weeks: number
+  on_time_rate: number
+  kg_co2e_per_unit: number
+  arrives_before_stockout: boolean
+  score: number
+  components: Record<string, number>
+}
+
+export type JournalEntry = {
+  id: number
+  number: string
+  entry_date: string
+  memo: string
+  ledger: 'financial' | 'memo'
+  posted_to: string
+  external_ref: string | null
+  lines: { account_code: string; account_name: string; debit: number; credit: number }[]
+}
+
+export type Decision = {
+  id: number
+  kind: 'purchase_order' | 'write_off'
+  status: 'pending' | 'approved' | 'rejected'
+  title: string
+  reason: string
+  impact_usd: number
+  source: 'manual' | 'model'
+  payload: { sku_id: number; quantity: number; vendor_id?: number; unit_cost?: number }
+  details: {
+    sku_code: string
+    category: string
+    confidence: 'High' | 'Medium' | 'Low'
+    order_by: string | null
+    stockout_date: string | null
+    on_hand: number
+    on_order: number
+    amount: number
+    kg_co2e: number
+    vendor_options: VendorOption[]
+    weights: Record<string, number>
+  } | null
+  created_at: string
+  decided_at: string | null
+  decided_by: string | null
+  note: string | null
+  last_error: string | null
+  purchase_order: { id: number; number: string; vendor: string; quantity: number; amount: number; external_system: string | null; expected_date: string } | null
+  journal_entry: JournalEntry | null
+}
+
+export type SkuPlan = {
+  sku_id: number
+  sku_code: string
+  sku_name: string
+  category: string
+  status: 'order_now' | 'upcoming' | 'healthy' | 'overstocked'
+  on_hand: number
+  on_order: number
+  stockout_date: string | null
+  order_by: string | null
+  quantity: number
+  amount: number
+  vendor: VendorOption | null
+  confidence: string
+  reason: string
+}
+
+export type RecommendationRun = {
+  as_of: string
+  weights: Record<string, number>
+  emission_pressure: number
+  forecast: { model: string; backtest_wape: number; naive_wape: number; backtest_weeks: number; horizon_weeks: number }
+  plans: SkuPlan[]
+  budget: { month: string; recommended: number; plan_budget: number | null; within_budget: boolean }[]
+  plan_alignment: { forecast_revenue: number; plan_revenue: number; gap_pct: number | null; weeks_compared: number }
+}
+
+export type SkuInfo = { id: number; code: string; name: string; category: string; vendor: string; unit_cost: number; on_hand: number }
+export type VendorInfo = { id: number; name: string; price_index: number; lead_time_days: number; on_time_rate: number; kg_co2e_per_usd: number }
+
 export class ApiError extends Error {}
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

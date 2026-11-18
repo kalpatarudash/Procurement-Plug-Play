@@ -13,7 +13,10 @@ In another terminal, from the project root, run the frontend: `PORT=8080 pnpm ru
 Vite forwards `/api/*` to the backend.
 
 The database (`prosight.db`) is created and filled with synthetic data on first start.
-Reset it with `uv run python -m prosight.seed`. Run tests with `uv run pytest`.
+Reset it with `uv run python -m prosight.seed` (also needed after a model change: the server
+refuses to start on an out-of-date database and says so). Run tests with `uv run pytest`.
+
+LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 
 ## Layout
 
@@ -28,6 +31,8 @@ Reset it with `uv run python -m prosight.seed`. Run tests with `uv run pytest`.
 | `ledger.py` | Balanced double-entry journal posting and chart of accounts |
 | `emissions.py` | Scope 1/2/3 accounting with EPA factors (`data/` holds the EPA v1.3 supply-chain factor CSV) |
 | `planning.py` | FY targets: revenue → purchase budget; emission target → gap and ranked reduction levers |
+| `forecasting.py` | LightGBM weekly demand forecast per SKU, backtested against a naive baseline |
+| `recommendations.py` | Reorder timing, quantity and vendor choice per SKU; creates pending PO decisions |
 | `seed.py` | Deterministic synthetic dataset (2 years of weekly sales, stock lots, PO history) |
 
 ## Accounting treatment on approval

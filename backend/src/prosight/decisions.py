@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -121,11 +121,36 @@ def _execute_write_off(db: Session, decision: Decision) -> None:
     )
 
 
-def approve(db: Session, decision: Decision, approved_by: str) -> Decision:
+def apply_overrides(db: Session, decision: Decision, quantity: int | None, vendor_id: int | None) -> None:
+    """Admin edits before approval. Changing vendor re-prices at that vendor's price index."""
+    if quantity is None and vendor_id is None:
+        return
+    payload = dict(decision.payload)
+    if quantity is not None:
+        payload["quantity"] = quantity
+    if vendor_id is not None:
+        if decision.kind != "purchase_order":
+            raise DecisionError("Only purchase orders have a vendor.")
+        vendor, sku = db.get(Vendor, vendor_id), db.get(Sku, payload["sku_id"])
+        if vendor is None:
+            raise DecisionError(f"Vendor {vendor_id} does not exist.")
+        if vendor_id != payload["vendor_id"]:
+            payload["vendor_id"] = vendor_id
+            payload["unit_cost"] = round(sku.unit_cost * vendor.price_index, 2)
+    decision.payload = validate_payload(db, decision.kind, payload)
+    if decision.kind == "purchase_order":
+        sku, vendor = db.get(Sku, payload["sku_id"]), db.get(Vendor, payload["vendor_id"])
+        decision.title = f"Order {payload['quantity']:,} × {sku.name} from {vendor.name}"
+
+
+def approve(
+    db: Session, decision: Decision, approved_by: str, quantity: int | None = None, vendor_id: int | None = None
+) -> Decision:
     if decision.status != "pending":
         raise DecisionError(f"This decision is already {decision.status}.")
     decision_id = decision.id
     try:
+        apply_overrides(db, decision, quantity, vendor_id)
         if decision.kind == "purchase_order":
             _execute_purchase_order(db, decision)
         else:
@@ -142,6 +167,9 @@ def approve(db: Session, decision: Decision, approved_by: str) -> Decision:
         failed.last_error = str(exc)
         db.commit()
         raise
+    except ValidationError as exc:
+        db.rollback()
+        raise DecisionError(exc.errors(include_url=False)[0]["msg"]) from exc
     except Exception:
         db.rollback()
         raise

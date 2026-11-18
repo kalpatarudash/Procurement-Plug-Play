@@ -38,6 +38,7 @@ class DecisionOut(BaseModel):
     impact_usd: float
     source: str
     payload: dict[str, Any]
+    details: dict[str, Any] | None
     created_at: datetime
     decided_at: datetime | None
     decided_by: str | None
@@ -49,6 +50,8 @@ class DecisionOut(BaseModel):
 
 class ApproveIn(BaseModel):
     approved_by: str = Field(min_length=1, max_length=120)
+    quantity: int | None = Field(None, gt=0, description="Override the proposed quantity.")
+    vendor_id: int | None = Field(None, description="Override the vendor (POs only); re-priced at its price index.")
 
 
 class RejectIn(BaseModel):
@@ -66,6 +69,7 @@ def decision_out(d: Decision) -> DecisionOut:
         impact_usd=d.impact_usd,
         source=d.source,
         payload=d.payload,
+        details=d.details,
         created_at=d.created_at,
         decided_at=d.decided_at,
         decided_by=d.decided_by,
@@ -119,7 +123,7 @@ def approve_decision(decision_id: int, body: ApproveIn, db: Db):
     """Approve, execute (create the PO / write off the stock), and post to the ABOR."""
     decision = _get_decision(db, decision_id)
     try:
-        decisions.approve(db, decision, body.approved_by)
+        decisions.approve(db, decision, body.approved_by, body.quantity, body.vendor_id)
     except decisions.DecisionError as exc:
         raise HTTPException(409, str(exc)) from exc
     except ConnectorError as exc:
