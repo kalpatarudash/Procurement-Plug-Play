@@ -1,6 +1,7 @@
 """Read endpoints: financials, inventory, vendors, purchase orders, ledger."""
 
-from datetime import date
+from collections import defaultdict
+from datetime import date, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from .. import analytics, emissions
 from ..config import settings
 from ..db import get_db
-from ..models import JournalEntry, PurchaseOrder, Vendor
+from ..models import JournalEntry, PurchaseOrder, Sku, Vendor
 
 router = APIRouter()
 Db = Annotated[Session, Depends(get_db)]
@@ -108,7 +109,9 @@ class SkuOut(BaseModel):
     code: str
     name: str
     category: str
-    vendor: str
+    vendor: str  # preferred vendor
+    vendor_id: int
+    alternative_vendors: list[str]  # other vendors already supplying this category
     unit_cost: float
     unit_price: float
     on_hand: int
@@ -117,6 +120,7 @@ class SkuOut(BaseModel):
     avg_weekly_units: float
     weeks_of_cover: float | None
     stockout_risk: bool
+    status: str  # Stockout risk | Aging | Overstocked | Healthy
 
 
 class InventoryOut(BaseModel):
@@ -147,8 +151,19 @@ def get_inventory(db: Db):
     )
 
 
+def _sku_status(p: analytics.SkuPosition) -> str:
+    if p.stockout_risk:
+        return "Stockout risk"
+    if p.aged_units:
+        return "Aging"
+    if p.weeks_of_cover is None or p.weeks_of_cover > 16:
+        return "Overstocked"
+    return "Healthy"
+
+
 @router.get("/inventory/skus", response_model=list[SkuOut], tags=["inventory"])
 def list_skus(db: Db):
+    suppliers = analytics.category_suppliers(db)
     return [
         SkuOut(
             id=p.sku.id,
@@ -156,6 +171,8 @@ def list_skus(db: Db):
             name=p.sku.name,
             category=p.sku.category.name,
             vendor=p.sku.vendor.name,
+            vendor_id=p.sku.vendor.id,
+            alternative_vendors=sorted(v.name for v in suppliers[p.sku.category_id].values() if v.id != p.sku.vendor.id),
             unit_cost=p.sku.unit_cost,
             unit_price=p.sku.unit_price,
             on_hand=p.on_hand,
@@ -164,6 +181,7 @@ def list_skus(db: Db):
             avg_weekly_units=round(p.avg_weekly_units, 2),
             weeks_of_cover=round(p.weeks_of_cover, 1) if p.weeks_of_cover is not None else None,
             stockout_risk=p.stockout_risk,
+            status=_sku_status(p),
         )
         for p in analytics.inventory_snapshot(db).skus
     ]
@@ -181,10 +199,38 @@ class VendorOut(BaseModel):
     industry_kg_co2e_per_usd: float
     emission_intensity_index: float
     kg_co2e_per_usd: float
+    preferred_sku_count: int  # items that list this vendor as preferred
+    categories: list[str]  # categories this vendor supplies
+    open_po_count: int
+    open_po_value: float
+    spend_12m: float  # PO value issued in the last 12 months
+    last_po_date: date | None
 
 
 @router.get("/vendors", response_model=list[VendorOut], tags=["vendors"])
 def list_vendors(db: Db):
+    preferred: dict[int, int] = defaultdict(int)
+    category_name = {}
+    for sku in db.scalars(select(Sku).options(selectinload(Sku.category))):
+        preferred[sku.vendor_id] += 1
+        category_name[sku.category_id] = sku.category.name
+    supplies: dict[int, set[str]] = defaultdict(set)
+    for category_id, vendors in analytics.category_suppliers(db).items():
+        for vendor_id in vendors:
+            supplies[vendor_id].add(category_name.get(category_id, "?"))
+    open_count: dict[int, int] = defaultdict(int)
+    open_value: dict[int, float] = defaultdict(float)
+    spend: dict[int, float] = defaultdict(float)
+    last_po: dict[int, date] = {}
+    year_ago = settings.as_of - timedelta(days=365)
+    for po in db.scalars(select(PurchaseOrder).where(PurchaseOrder.status != "cancelled")):
+        if po.status == "open":
+            open_count[po.vendor_id] += 1
+            open_value[po.vendor_id] += po.amount
+        if po.issued_date > year_ago:
+            spend[po.vendor_id] += po.amount
+        last_po[po.vendor_id] = max(last_po.get(po.vendor_id, po.issued_date), po.issued_date)
+
     out = []
     for v in db.scalars(select(Vendor).order_by(Vendor.name)):
         industry = emissions.industry_factor(v.naics_code)
@@ -193,6 +239,9 @@ def list_vendors(db: Db):
             price_index=v.price_index, naics_code=v.naics_code, industry=industry.title,
             industry_kg_co2e_per_usd=industry.kg_co2e_per_usd, emission_intensity_index=v.emission_intensity_index,
             kg_co2e_per_usd=round(emissions.vendor_factor(v), 4),
+            preferred_sku_count=preferred[v.id], categories=sorted(supplies[v.id]),
+            open_po_count=open_count[v.id], open_po_value=round(open_value[v.id], 2),
+            spend_12m=round(spend[v.id], 2), last_po_date=last_po.get(v.id),
         ))
     return out
 

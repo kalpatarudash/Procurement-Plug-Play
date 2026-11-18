@@ -1,3 +1,6 @@
+import pytest
+
+
 def _sku(client, category):
     return next(s for s in client.get("/api/inventory/skus").json() if s["category"] == category)
 
@@ -30,6 +33,21 @@ def test_inventory_flags_overstock_and_aging(client):
     statuses = {c["name"]: c["status"] for c in body["categories"]}
     assert statuses["Spring Outerwear"] == "Overstocked"
     assert statuses["Accessories"] == "Aging"
+
+
+def test_items_list_vendors_and_vendors_summarise_items(client):
+    skus = client.get("/api/inventory/skus").json()
+    vendors = {v["name"]: v for v in client.get("/api/vendors").json()}
+    for s in skus:
+        assert s["vendor"] in vendors and s["vendor"] not in s["alternative_vendors"]
+        assert set(s["alternative_vendors"]) <= set(vendors)
+        assert s["status"] in {"Stockout risk", "Aging", "Overstocked", "Healthy"}
+    assert sum(v["preferred_sku_count"] for v in vendors.values()) == len(skus)
+    open_pos = client.get("/api/purchase-orders", params={"status": "open"}).json()
+    assert sum(v["open_po_count"] for v in vendors.values()) == len(open_pos)
+    assert sum(v["open_po_value"] for v in vendors.values()) == pytest.approx(sum(p["amount"] for p in open_pos), abs=0.05)
+    for s in skus:
+        assert s["category"] in vendors[s["vendor"]]["categories"]
 
 
 def test_write_off_approval_posts_balanced_entry_and_reduces_oldest_stock(client):

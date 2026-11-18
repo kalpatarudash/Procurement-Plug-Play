@@ -268,8 +268,42 @@ export type RecommendationRun = {
   plan_alignment: { forecast_revenue: number; plan_revenue: number; gap_pct: number | null; weeks_compared: number }
 }
 
-export type SkuInfo = { id: number; code: string; name: string; category: string; vendor: string; unit_cost: number; on_hand: number }
-export type VendorInfo = { id: number; name: string; price_index: number; lead_time_days: number; on_time_rate: number; kg_co2e_per_usd: number }
+export type SkuInfo = {
+  id: number
+  code: string
+  name: string
+  category: string
+  vendor: string
+  vendor_id: number
+  alternative_vendors: string[]
+  unit_cost: number
+  unit_price: number
+  on_hand: number
+  stock_value: number
+  aged_units: number
+  avg_weekly_units: number
+  weeks_of_cover: number | null
+  stockout_risk: boolean
+  status: 'Stockout risk' | 'Aging' | 'Overstocked' | 'Healthy'
+}
+
+export type VendorInfo = {
+  id: number
+  name: string
+  price_index: number
+  lead_time_days: number
+  on_time_rate: number
+  naics_code: string
+  industry: string
+  kg_co2e_per_usd: number
+  emission_intensity_index: number
+  preferred_sku_count: number
+  categories: string[]
+  open_po_count: number
+  open_po_value: number
+  spend_12m: number
+  last_po_date: string | null
+}
 
 export type ImportReport = {
   ok: boolean

@@ -23,10 +23,10 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
-from . import emissions, forecasting, planning
+from . import analytics, emissions, forecasting, planning
 from .config import settings
 from .decisions import skus_on_hold
-from .models import Decision, PurchaseOrder, Sku, Vendor
+from .models import Decision, PurchaseOrder, Sku
 
 SERVICE_LEVEL_Z = 1.65  # ≈95% cycle service level
 REVIEW_WEEKS = 1  # recommendations are reviewed weekly
@@ -143,12 +143,7 @@ def build_recommendations(db: Session) -> RecommendationRun:
         arrivals[po.sku_id][week] += po.quantity
         on_order[po.sku_id] += po.quantity
 
-    # Vendors that already supply each category (from item master and PO history).
-    suppliers: dict[int, dict[int, Vendor]] = defaultdict(dict)
-    for sku in skus:
-        suppliers[sku.category_id][sku.vendor.id] = sku.vendor
-    for po in db.scalars(select(PurchaseOrder).options(selectinload(PurchaseOrder.vendor), selectinload(PurchaseOrder.sku))):
-        suppliers[po.sku.category_id][po.vendor.id] = po.vendor
+    suppliers = analytics.category_suppliers(db)  # vendors already supplying each category
 
     plans = []
     for sku in skus:

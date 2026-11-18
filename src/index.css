@@ -217,6 +217,25 @@ h2 { font-size: 18px; }
 .rec-actions { flex-wrap: wrap; justify-content: flex-end; }
 .rec-impact button, .hero-actions button, .impact-pill { white-space: nowrap; }
 .chart-empty { color: #8a9591; font-size: 11px; margin: 30px 0; }
+.inventory-tables { margin-bottom: 16px; }
+.view-tabs { display: flex; gap: 4px; border-bottom: 1px solid #e3e8e3; margin: 6px 0 14px; }
+.view-tabs button { border: 0; background: none; padding: 9px 12px; color: #74817d; font-size: 12px; font-weight: 700; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.view-tabs button.active { color: #193a33; border-bottom-color: #315f55; }
+.table-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.table-tools input, .table-tools select { border: 1px solid #d8dfda; border-radius: 8px; padding: 8px 10px; font-size: 11px; color: #243a34; background: white; }
+.table-tools input { flex: 1; min-width: 200px; max-width: 360px; }
+.table-tools span { color: #8a9591; font-size: 10px; margin-left: auto; }
+.data-table { overflow-x: auto; }
+.data-head, .data-row { display: grid; gap: 12px; align-items: center; padding: 10px 6px; min-width: 860px; }
+.items-table .data-head, .items-table .data-row { grid-template-columns: 1.4fr 1fr 1.9fr .6fr .8fr .7fr .9fr; }
+.vendors-table .data-head, .vendors-table .data-row { grid-template-columns: 1.6fr 1.4fr .6fr .6fr .5fr .8fr .7fr .9fr .8fr; min-width: 1000px; }
+.data-head { color: #8a9591; font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; border-bottom: 1px solid #e8ebe7; }
+.data-row { border-bottom: 1px solid #eef1ed; font-size: 11px; color: #4f605a; }
+.data-row strong { display: block; color: #2f413c; font-size: 12px; }
+.data-row small { display: block; color: #8a9591; font-size: 10px; margin-top: 2px; }
+.data-row.highlight { background: #f2f7ef; box-shadow: inset 3px 0 0 #315f55; }
+.link-button { border: 0; background: none; padding: 0; color: #315f55; font-size: 12px; font-weight: 700; text-align: left; cursor: pointer; }
+.link-button:hover { text-decoration: underline; }
 .import-panel { margin-top: 16px; margin-bottom: 16px; }
 .dataset-badge { flex: none; border-radius: 16px; padding: 6px 10px; font-size: 9px; font-weight: 700; background: #edf1ec; color: #5f6f69; }
 .dataset-badge.import { background: #e8f0df; color: #315f55; }

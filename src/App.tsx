@@ -825,21 +825,106 @@ function InventoryPage() {
           <Metric label="Stockout risk" value={`${data.stockout_risk_skus} SKUs`} detail="Next 30 days" tone="blue" />
         </section>
       )}
+      {data && <InventoryTables inventory={data} />}
       <Connectors />
       <ImportPanel />
-      {data && (
-        <section className="panel statement-panel">
-          <div className="panel-heading"><div><span className="eyebrow">CATEGORY PERFORMANCE</span><h2>Capital by category</h2></div><span className="period-note">As of {formatDate(data.as_of)}</span></div>
-          {data.categories.map(category => (
+    </>
+  )
+}
+
+type InventoryView = 'items' | 'vendors' | 'categories'
+
+function InventoryTables({ inventory }: { inventory: Inventory }) {
+  const [view, setView] = useState<InventoryView>('items')
+  const [vendorFilter, setVendorFilter] = useState('')
+  const [search, setSearch] = useState('')
+  const [highlight, setHighlight] = useState<string | null>(null)
+  const items = useApi<SkuInfo[]>('/inventory/skus')
+  const vendors = useApi<VendorInfo[]>('/vendors')
+
+  const showVendor = (name: string) => { setHighlight(name); setView('vendors') }
+  const showItemsFor = (name: string) => { setVendorFilter(name); setSearch(''); setView('items') }
+  const q = search.trim().toLowerCase()
+  const shownItems = (items.data ?? []).filter(s =>
+    (!vendorFilter || s.vendor === vendorFilter) && (!q || `${s.name} ${s.code} ${s.category}`.toLowerCase().includes(q)))
+
+  const tabs: [InventoryView, string][] = [
+    ['items', `Items${items.data ? ` (${items.data.length})` : ''}`],
+    ['vendors', `Vendors${vendors.data ? ` (${vendors.data.length})` : ''}`],
+    ['categories', 'By category'],
+  ]
+  return (
+    <section className="panel inventory-tables">
+      <div className="panel-heading">
+        <div><span className="eyebrow">STOCK POSITION</span><h2>{view === 'items' ? 'Items and their vendors' : view === 'vendors' ? 'All vendors' : 'Capital by category'}</h2></div>
+        <span className="period-note">As of {formatDate(inventory.as_of)}</span>
+      </div>
+      <div className="view-tabs" role="tablist">
+        {tabs.map(([key, label]) => <button key={key} role="tab" aria-selected={view === key} className={view === key ? 'active' : ''} onClick={() => setView(key)}>{label}</button>)}
+      </div>
+
+      {view === 'items' && (!items.data ? <LoadState error={items.error} onRetry={items.reload} /> : (
+        <>
+          <div className="table-tools">
+            <input type="search" placeholder="Search items, codes or categories" value={search} onChange={e => setSearch(e.target.value)} aria-label="Search items" />
+            <select value={vendorFilter} onChange={e => setVendorFilter(e.target.value)} aria-label="Filter by vendor">
+              <option value="">All vendors</option>
+              {[...new Set(items.data.map(s => s.vendor))].sort().map(v => <option key={v}>{v}</option>)}
+            </select>
+            <span>{shownItems.length} of {items.data.length} items</span>
+          </div>
+          <div className="data-table items-table">
+            <div className="data-head"><span>Item</span><span>Category</span><span>Vendor</span><span>On hand</span><span>Stock value</span><span>Weeks of cover</span><span>Status</span></div>
+            {shownItems.map(s => (
+              <div className="data-row" key={s.id}>
+                <span><strong>{s.name}</strong><small>{s.code}</small></span>
+                <span>{s.category}</span>
+                <span>
+                  <button className="link-button" onClick={() => showVendor(s.vendor)}>{s.vendor}</button>
+                  {s.alternative_vendors.length > 0 && <small title={`Also supplied by: ${s.alternative_vendors.join(', ')}`}>+{s.alternative_vendors.length} alternative{s.alternative_vendors.length === 1 ? '' : 's'}: {s.alternative_vendors.join(', ')}</small>}
+                </span>
+                <span>{s.on_hand.toLocaleString()}</span>
+                <span>${Math.round(s.stock_value).toLocaleString()}</span>
+                <span>{s.weeks_of_cover === null ? '—' : s.weeks_of_cover.toFixed(1)}</span>
+                <span><b className={`status ${STATUS_CLASS[s.status] ?? 'status-1'}`}>{s.status}</b></span>
+              </div>
+            ))}
+            {shownItems.length === 0 && <p className="empty-state">No items match.</p>}
+          </div>
+        </>
+      ))}
+
+      {view === 'vendors' && (!vendors.data ? <LoadState error={vendors.error} onRetry={vendors.reload} /> : (
+        <div className="data-table vendors-table">
+          <div className="data-head"><span>Vendor</span><span>Supplies</span><span>Items</span><span>Lead time</span><span>On time</span><span>Price vs benchmark</span><span>CO₂e per $</span><span>Open POs</span><span>Spend, last 12 mo</span></div>
+          {vendors.data.map(v => (
+            <div className={`data-row ${highlight === v.name ? 'highlight' : ''}`} key={v.id}>
+              <span><strong>{v.name}</strong><small title={`NAICS ${v.naics_code}`}>{v.industry}</small></span>
+              <span>{v.categories.join(', ') || '—'}</span>
+              <span>{v.preferred_sku_count > 0 ? <button className="link-button" onClick={() => showItemsFor(v.name)}>{v.preferred_sku_count} item{v.preferred_sku_count === 1 ? '' : 's'}</button> : '0'}</span>
+              <span>{v.lead_time_days} days</span>
+              <span>{formatPct(v.on_time_rate, 0)}</span>
+              <span>{v.price_index === 1 ? 'At benchmark' : `${v.price_index > 1 ? '+' : '−'}${Math.round(Math.abs(v.price_index - 1) * 100)}%`}</span>
+              <span>{v.kg_co2e_per_usd.toFixed(3)} kg</span>
+              <span>{v.open_po_count ? `${v.open_po_count} · ${formatMoney(v.open_po_value)}` : '—'}</span>
+              <span>{formatMoney(v.spend_12m)}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {view === 'categories' && (
+        <div className="statement-panel">
+          {inventory.categories.map(category => (
             <div className="statement-row" key={category.name}>
               <span>{category.name} · <em className="category-status">{category.status}</em></span>
               <strong>${Math.round(category.stock_value).toLocaleString()}</strong>
             </div>
           ))}
-          <div className="statement-row total"><span>Total</span><strong>${Math.round(data.total_value).toLocaleString()}</strong></div>
-        </section>
+          <div className="statement-row total"><span>Total</span><strong>${Math.round(inventory.total_value).toLocaleString()}</strong></div>
+        </div>
       )}
-    </>
+    </section>
   )
 }
 

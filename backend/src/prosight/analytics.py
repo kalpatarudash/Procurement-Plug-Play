@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
 from .connectors.base import FinancialSummary
-from .models import OperatingExpense, SalesWeek, Sku
+from .models import OperatingExpense, PurchaseOrder, SalesWeek, Sku, Vendor
 
 View = Literal["YTD", "QTD", "MTD"]
 
@@ -87,6 +87,18 @@ def monthly_revenue(db: Session, start: date, end: date) -> list[tuple[date, flo
             day = week_start + timedelta(days=offset)
             totals[day.replace(day=1)] += revenue / 7
     return sorted(totals.items())
+
+
+# --- Suppliers -------------------------------------------------------------------------------
+def category_suppliers(db: Session) -> dict[int, dict[int, Vendor]]:
+    """Vendors able to supply each category: preferred vendors in the item master plus every vendor
+    the category has been ordered from. The PO recommender chooses among exactly these."""
+    suppliers: dict[int, dict[int, Vendor]] = defaultdict(dict)
+    for sku in db.scalars(select(Sku).options(selectinload(Sku.vendor))):
+        suppliers[sku.category_id][sku.vendor.id] = sku.vendor
+    for po in db.scalars(select(PurchaseOrder).options(selectinload(PurchaseOrder.vendor), selectinload(PurchaseOrder.sku))):
+        suppliers[po.sku.category_id][po.vendor.id] = po.vendor
+    return suppliers
 
 
 # --- Inventory -------------------------------------------------------------------------------
