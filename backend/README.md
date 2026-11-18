@@ -18,6 +18,29 @@ refuses to start on an out-of-date database and says so). Run tests with `uv run
 
 LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 
+## Deploying
+
+The frontend is static and can live on Cloudflare (or Figma Make). The API is Python with
+LightGBM and SQLite, so it needs a Python host; the frontend then calls it by URL.
+
+1. **Backend on Render** (free plan): Render → New → Blueprint → choose this repository. It uses
+   [`render.yaml`](../render.yaml) and [`Dockerfile`](Dockerfile). When it's live, opening
+   `https://<your-service>.onrender.com/api/health` shows `{"status":"ok"}`.
+2. **Allow the frontend's site**: `PROSIGHT_CORS_ORIGINS` (set in `render.yaml`) must list the
+   frontend's address, comma-separated if more than one, e.g.
+   `https://procurement-plug-play.kalpataru7165.workers.dev`.
+3. **Point the frontend at it**: in Cloudflare, add the build variable
+   `VITE_API_URL=https://<your-service>.onrender.com` and redeploy. It's read at build time, so
+   changing it always needs a rebuild.
+
+Free-plan limits: the service sleeps after ~15 minutes idle (the next visit takes about a minute
+to wake it), and its disk is wiped on restart, so the demo data is re-created and imported data
+must be uploaded again. For data that persists, use a plan with a persistent disk and set
+`PROSIGHT_DATABASE_URL=sqlite:////<disk mount>/prosight.db`.
+
+Without a backend the site shows "Can't reach the Pro-sight API … returned a web page instead of
+data": the static host answers `/api/...` with the app's own HTML page.
+
 ## Your own data (Excel / CSV)
 
 The demo dataset is synthetic (`seed.py`). To use real data, open the Inventory or Financials tab →

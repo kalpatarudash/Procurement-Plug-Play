@@ -1,0 +1,14 @@
+# Render Blueprint for the Pro-sight API (https://render.com/docs/blueprint-spec).
+# In Render: New → Blueprint → pick this repository.
+services:
+  - type: web
+    name: prosight-api
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      # The site(s) allowed to call the API from the browser: your Cloudflare frontend.
+      - key: PROSIGHT_CORS_ORIGINS
+        value: https://procurement-plug-play.kalpataru7165.workers.dev

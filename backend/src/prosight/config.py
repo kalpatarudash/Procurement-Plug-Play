@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     currency: str = "USD"
     # Stock older than this counts as aging.
     aging_days: int = 180
+    # Comma-separated sites allowed to call the API from a browser when the frontend is hosted
+    # elsewhere, e.g. "https://procurement-plug-play.example.workers.dev". Empty = same-site only.
+    cors_origins: str = ""
 
     # --- Connector credentials (leave blank to keep a connector unconfigured) ---
     sap_base_url: str | None = None

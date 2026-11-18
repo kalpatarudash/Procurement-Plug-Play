@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import inspect, select
 
 from . import runtime
 from .api import actions, imports, planning, recommendations, reporting, writeoffs
+from .config import settings
 from .db import Base, SessionLocal, engine
 from .forecasting import NotEnoughHistory
 from .models import Category
@@ -45,6 +47,12 @@ app = FastAPI(
     "LightGBM-driven PO recommendations, and admin-approved decisions posted to the account book of record.",
     lifespan=lifespan,
 )
+
+
+_origins = [o.strip().rstrip("/") for o in settings.cors_origins.split(",") if o.strip()]
+if _origins:
+    # Lets a separately hosted frontend (e.g. Cloudflare) call this API.
+    app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.exception_handler(NotEnoughHistory)

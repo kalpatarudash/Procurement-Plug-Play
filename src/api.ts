@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 
-/** Base URL of the Pro-sight backend. In dev, Vite proxies /api to the FastAPI server. */
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+/**
+ * Base URL of the Pro-sight backend. Empty = same site: in dev, Vite proxies /api to FastAPI.
+ * For a hosted frontend (e.g. Cloudflare), set VITE_API_URL at build time to the backend's URL.
+ */
+export const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
 
 export type Period = { view: 'YTD' | 'QTD' | 'MTD' } | { start: string; end: string }
 
@@ -315,6 +318,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     })
   } catch {
     throw new ApiError('Can’t reach the Pro-sight API. Is the backend running?')
+  }
+  // A static host with no backend behind /api answers with the app's own HTML page instead of
+  // data; reading that as JSON fails with a cryptic browser message, so say what happened.
+  if (!(res.headers.get('content-type') ?? '').includes('json')) {
+    throw new ApiError(`Can’t reach the Pro-sight API: ${new URL(apiUrl(''), window.location.href).href} returned a web page instead of data.`)
   }
   if (!res.ok) {
     const body = await res.json().catch(() => null)

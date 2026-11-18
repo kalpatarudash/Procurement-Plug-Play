@@ -638,7 +638,9 @@ function LoadState({ error, onRetry }: { error: string | null; onRetry: () => vo
   return (
     <section className="panel load-state">
       {error
-        ? <><Icon name="alert" /><div><strong>{error}</strong>{error.includes('reach the Pro-sight API') && <p>Start it with <code>cd backend && uv run uvicorn prosight.main:app --reload</code></p>}</div><button className="secondary-button" onClick={onRetry}>Retry</button></>
+        ? <><Icon name="alert" /><div><strong>{error}</strong>{error.includes('reach the Pro-sight API') && (['localhost', '127.0.0.1'].includes(window.location.hostname)
+          ? <p>Start it with <code>cd backend && uv run uvicorn prosight.main:app --reload</code></p>
+          : <p>This site only hosts the frontend. Deploy the backend (see <code>backend/README.md</code>, “Deploying”) and rebuild the site with <code>VITE_API_URL</code> set to its address.</p>)}</div><button className="secondary-button" onClick={onRetry}>Retry</button></>
         : <p>Loading…</p>}
     </section>
   )
