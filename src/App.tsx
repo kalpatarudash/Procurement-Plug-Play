@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Decision, type Emissions, type Financials, type Inventory, type Period, type PlanResponse, type RecommendationRun, type SkuInfo, type VendorInfo } from './api'
+import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Decision, type Emissions, type Financials, type Inventory, type Period, type PlanResponse, type RecommendationRun, type SkuInfo, type VendorInfo, type WriteOffRun } from './api'
 
 type IconName =
   | 'grid'
@@ -281,6 +281,16 @@ function DecisionCard({ decision, rank, onChanged }: { decision: Decision; rank:
   const unitCost = vendor?.unit_cost ?? decision.payload.unit_cost ?? 0
   const amount = quantity * unitCost
   const kg = vendor ? quantity * vendor.kg_co2e_per_unit : d?.kg_co2e
+  const kindLabel = isPO ? 'PROCUREMENT' : decision.kind === 'markdown' ? 'INVENTORY · MARKDOWN' : 'INVENTORY · WRITE-OFF'
+  // Value shown on the card, scaled if the admin edits the quantity.
+  const value = isPO ? amount
+    : decision.kind === 'markdown' ? quantity * (decision.payload.clearance_price ?? 0)
+    : d ? (d.amount * quantity) / decision.payload.quantity : decision.impact_usd
+  const valueLabel = isPO ? 'ORDER VALUE' : decision.kind === 'markdown' ? 'CLEARANCE REVENUE' : 'WRITE-OFF AT COST'
+  const meta = !d ? [] : isPO
+    ? [d.order_by && `Order by ${shortDate(d.order_by)}`, d.stockout_date && `stockout ~${shortDate(d.stockout_date)}`, `${d.on_hand.toLocaleString()} on hand`, `${(d.on_order ?? 0).toLocaleString()} on order`]
+    : [`${(d.aged_units ?? 0).toLocaleString()} aged of ${d.on_hand.toLocaleString()} on hand`, d.oldest_days && `oldest ${d.oldest_days} days`,
+       decision.kind === 'markdown' && d.unit_price && `$${decision.payload.clearance_price?.toFixed(2)} (was $${d.unit_price.toFixed(2)})`]
   const edited = quantity !== decision.payload.quantity || vendorId !== decision.payload.vendor_id
 
   const act = async (action: 'approve' | 'reject') => {
@@ -303,13 +313,13 @@ function DecisionCard({ decision, rank, onChanged }: { decision: Decision; rank:
       <div className="rec-rank">{String(rank).padStart(2, '0')}</div>
       <div className="rec-copy">
         <div>
-          <span className="eyebrow">{isPO ? 'PROCUREMENT' : 'INVENTORY'}{decision.source === 'manual' && ' · MANUAL'}</span>
+          <span className="eyebrow">{kindLabel}{decision.source === 'manual' && ' · MANUAL'}</span>
           {d && <span className={`confidence ${CONFIDENCE_CLASS[d.confidence]}`}>{d.confidence} confidence</span>}
           {isPO && kg !== undefined && <span className="carbon-credit">{Math.round(kg).toLocaleString()} kg CO₂e</span>}
         </div>
         <h2>{decision.title}</h2>
         <p>{decision.reason}</p>
-        {d && <p className="rec-meta">{[d.order_by && `Order by ${shortDate(d.order_by)}`, d.stockout_date && `stockout ~${shortDate(d.stockout_date)}`, `${d.on_hand.toLocaleString()} on hand`, `${d.on_order.toLocaleString()} on order`].filter(Boolean).join(' · ')}</p>}
+        {meta.length > 0 && <p className="rec-meta">{meta.filter(Boolean).join(' · ')}</p>}
         {editing && (
           <div className="rec-edit">
             <label>Quantity<input type="number" min="1" value={quantity} onChange={e => setQuantity(toNumber(e.target.value, 1))} /></label>
@@ -323,12 +333,12 @@ function DecisionCard({ decision, rank, onChanged }: { decision: Decision; rank:
         {error && <p className="inline-error" role="alert">{error}</p>}
       </div>
       <div className="rec-impact">
-        <small>{isPO ? 'ORDER VALUE' : 'EST. IMPACT'}</small><strong>{formatMoney(isPO ? amount : decision.impact_usd)}</strong>
-        {isPO && decision.impact_usd > 0 && <small className="rec-protects">protects {formatMoney(decision.impact_usd)} margin</small>}
+        <small>{valueLabel}</small><strong>{formatMoney(value)}</strong>
+        {decision.impact_usd > 0 && <small className="rec-protects">{isPO ? `protects ${formatMoney(decision.impact_usd)} margin` : decision.kind === 'markdown' ? `+${formatMoney(decision.impact_usd)} cash vs holding` : `saves ${formatMoney(decision.impact_usd)} storage`}</small>}
         <div className="rec-actions">
           <button className="edit-button" disabled={busy} onClick={() => setEditing(!editing)}>{editing ? 'Done' : 'Edit'}</button>
           <button className="edit-button" disabled={busy} onClick={() => act('reject')}>Reject</button>
-          <button disabled={busy || quantity <= 0} onClick={() => act('approve')}>{busy ? 'Posting…' : isPO ? 'Place order' : 'Approve'} <Icon name="arrow" size={16} /></button>
+          <button disabled={busy || quantity <= 0} onClick={() => act('approve')}>{busy ? 'Posting…' : isPO ? 'Place order' : decision.kind === 'markdown' ? 'Approve markdown' : 'Approve write-off'} <Icon name="arrow" size={16} /></button>
         </div>
       </div>
     </article>
@@ -416,6 +426,7 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
   const pending = useApi<Decision[]>('/decisions?status=pending')
   const approved = useApi<Decision[]>('/decisions?status=approved')
   const [run, setRun] = useState<RecommendationRun | null>(null)
+  const [agingRun, setAgingRun] = useState<WriteOffRun | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
@@ -428,9 +439,13 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
     setRefreshing(true)
     setRunError(null)
     try {
-      const result = await api<{ created: number; run: RecommendationRun }>('/recommendations/refresh', { method: 'POST' })
-      setRun(result.run)
-      if (announce) setNotice(`Model re-run: ${result.created} order${result.created === 1 ? '' : 's'} recommended now.`)
+      const [orders, aging] = await Promise.all([
+        api<{ created: number; run: RecommendationRun }>('/recommendations/refresh', { method: 'POST' }),
+        api<{ created: number; run: WriteOffRun }>('/writeoffs/refresh', { method: 'POST' }),
+      ])
+      setRun(orders.run)
+      setAgingRun(aging.run)
+      if (announce) setNotice(`Model re-run: ${orders.created} order${orders.created === 1 ? '' : 's'} and ${aging.created} aging-stock action${aging.created === 1 ? '' : 's'} recommended.`)
       reloadPending()
     } catch (e) {
       setRunError((e as Error).message)
@@ -446,8 +461,12 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
     if (updated.status === 'approved' && updated.purchase_order) {
       const po = updated.purchase_order
       setNotice(`${po.number} sent to ${SYSTEM_NAMES[po.external_system ?? ''] ?? po.external_system}; ${updated.journal_entry?.number} posted to the book of record.`)
+    } else if (updated.status === 'approved' && updated.kind === 'markdown') {
+      setNotice(updated.journal_entry
+        ? `Markdown approved; ${updated.journal_entry.number} wrote the stock down to its clearance value in the book of record.`
+        : 'Markdown approved; the clearance price is above cost, so no write-down was needed.')
     } else if (updated.status === 'approved') {
-      setNotice(`Approved; ${updated.journal_entry?.number} posted to the book of record.`)
+      setNotice(`Write-off approved; ${updated.journal_entry?.number} posted to the book of record.`)
     } else {
       setNotice(`Rejected: ${updated.title}`)
     }
@@ -478,9 +497,9 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
   return (
     <>
       <section className="hero compact">
-        <div><span className="eyebrow">AGENTIC INSIGHTS</span><h1>Actions, not just answers.</h1><p>Purchase orders from the demand forecast, ranked by margin at risk. Approved orders post to your book of record.</p></div>
+        <div><span className="eyebrow">AGENTIC INSIGHTS</span><h1>Actions, not just answers.</h1><p>Purchase orders, markdowns and write-offs from the demand forecast. Approved decisions post to your book of record.</p></div>
         <div className="hero-actions">
-          <div className="impact-pill"><Icon name="spark" /> {formatMoney(totalImpact)} margin protected</div>
+          <div className="impact-pill"><Icon name="spark" /> {formatMoney(totalImpact)} potential impact</div>
           <button className="secondary-button" disabled={refreshing} onClick={() => refresh(true)}>{refreshing ? 'Running model…' : 'Re-run model'}</button>
           <button className="primary-button" onClick={() => setRequestOpen(true)}>+ Raise purchase request</button>
         </div>
@@ -506,6 +525,32 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
               <span>{pendingSkus.has(p.sku_id) ? <em>Pending</em> : p.quantity > 0 && <button className="text-button" disabled={raising === p.sku_id} onClick={() => raiseEarly(p.sku_id)}>Raise now <Icon name="arrow" size={13} /></button>}</span>
             </div>
           ))}
+        </section>
+      )}
+      {agingRun && agingRun.plans.length > 0 && (
+        <section className="panel upcoming-panel">
+          <div className="panel-heading"><div><span className="eyebrow">AGING STOCK</span><h2>Hold, mark down, or write off</h2></div></div>
+          <p className="aging-summary">
+            {formatMoney(agingRun.totals.aged_value)} of stock is over {agingRun.assumptions.aging_days} days old.
+            {' '}Recommended write-offs: {formatMoney(agingRun.totals.write_off_cost)} at cost. Markdowns bring in {formatMoney(agingRun.totals.markdown_revenue)} of clearance revenue,
+            {' '}{formatMoney(agingRun.totals.cash_gain_vs_hold)} more cash than holding.
+          </p>
+          <div className="aging-head"><span>SKU</span><span>Aged</span><span>Oldest</span><span>Hold: cash · write-off</span><span>Markdown: cash · write-off</span><span>Plan</span></div>
+          {agingRun.plans.map(p => (
+            <div className="aging-row" key={p.sku_id} title={p.reason}>
+              <span><strong>{p.sku_name}</strong><small>{p.category}</small></span>
+              <span>{p.aged_units.toLocaleString()} · {formatMoney(p.aged_value)}</span>
+              <span>{p.oldest_days} days</span>
+              <span className={p.recommendation !== 'markdown' ? 'best' : ''}>{formatMoney(p.hold.cash)} · {p.hold.write_off_units.toLocaleString()} units</span>
+              <span className={p.recommendation === 'markdown' ? 'best' : ''}>{formatMoney(p.markdown.cash)} · {p.markdown.write_off_units.toLocaleString()} units</span>
+              <span><b className={`aging-tag ${p.recommendation}`}>{p.recommendation === 'markdown' ? 'Mark down' : p.recommendation === 'write_off' ? 'Write off excess' : 'Hold'}</b></span>
+            </div>
+          ))}
+          <p className="source-note">
+            Cash over {agingRun.assumptions.sell_window_weeks} weeks from the demand forecast. Assumptions: stock older than {agingRun.assumptions.max_age_days} days can't be sold;
+            {' '}markdown {formatPct(agingRun.assumptions.clearance_discount, 0)} off with price elasticity {agingRun.assumptions.price_elasticity};
+            {' '}holding cost {formatPct(agingRun.assumptions.holding_cost_rate_annual, 0)} of cost a year; selling costs {formatPct(agingRun.assumptions.selling_cost_rate, 0)}. Hover a row for the reasoning.
+          </p>
         </section>
       )}
       {(approved.data?.length ?? 0) > 0 && (

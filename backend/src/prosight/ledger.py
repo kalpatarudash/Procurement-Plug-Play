@@ -2,6 +2,8 @@
 
 Accounting treatment:
   Stock write-off   Dr 5150 Inventory write-off expense / Cr 1300 Inventory           (financial)
+  Markdown below    Dr 5160 Inventory write-down (NRV) / Cr 1300 Inventory            (financial)
+  cost              for (cost − clearance price net of selling costs) × units.
   PO approved       Dr 9100 Purchase commitments / Cr 9200 Reserve for commitments    (memo)
                     A PO is a commitment, not a GL transaction, until goods arrive.
   PO received       Dr 1300 Inventory / Cr 2100 Goods received not invoiced           (financial)
@@ -23,6 +25,7 @@ ACCOUNTS = {
     "1300": "Inventory",
     "2100": "Goods received not invoiced",
     "5150": "Inventory write-off expense",
+    "5160": "Inventory write-down to net realizable value",
     "9100": "Purchase commitments (memo)",
     "9200": "Reserve for purchase commitments (memo)",
 }

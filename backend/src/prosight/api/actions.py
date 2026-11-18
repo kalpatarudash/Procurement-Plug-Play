@@ -20,12 +20,13 @@ Db = Annotated[Session, Depends(get_db)]
 
 # --- Decisions -------------------------------------------------------------------------------
 class DecisionCreate(BaseModel):
-    kind: Literal["purchase_order", "write_off"]
+    kind: Literal["purchase_order", "write_off", "markdown"]
     title: str = Field(min_length=1, max_length=200)
     reason: str = ""
     impact_usd: float = 0.0
     payload: dict[str, Any] = Field(
-        description="purchase_order: {sku_id, vendor_id, quantity, unit_cost}; write_off: {sku_id, quantity}"
+        description="purchase_order: {sku_id, vendor_id, quantity, unit_cost}; write_off: {sku_id, quantity}; "
+        "markdown: {sku_id, quantity, clearance_price}"
     )
 
 

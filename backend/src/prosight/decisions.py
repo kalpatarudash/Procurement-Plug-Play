@@ -28,7 +28,18 @@ class WriteOffProposal(BaseModel):
     quantity: int = Field(gt=0)
 
 
-PROPOSALS: dict[str, type[BaseModel]] = {"purchase_order": PurchaseOrderProposal, "write_off": WriteOffProposal}
+class MarkdownProposal(BaseModel):
+    sku_id: int
+    quantity: int = Field(gt=0)
+    clearance_price: float = Field(gt=0)
+
+
+PROPOSALS: dict[str, type[BaseModel]] = {
+    "purchase_order": PurchaseOrderProposal,
+    "write_off": WriteOffProposal,
+    "markdown": MarkdownProposal,
+}
+SELLING_COST_RATE = 0.05  # used for net realizable value on markdowns
 
 
 def validate_payload(db: Session, kind: str, payload: dict) -> dict:
@@ -38,7 +49,7 @@ def validate_payload(db: Session, kind: str, payload: dict) -> dict:
         raise DecisionError(f"SKU {proposal.sku_id} does not exist.")
     if isinstance(proposal, PurchaseOrderProposal) and db.get(Vendor, proposal.vendor_id) is None:
         raise DecisionError(f"Vendor {proposal.vendor_id} does not exist.")
-    if isinstance(proposal, WriteOffProposal) and proposal.quantity > sku.on_hand:
+    if isinstance(proposal, (WriteOffProposal, MarkdownProposal)) and proposal.quantity > sku.on_hand:
         raise DecisionError(f"Only {sku.on_hand} units of {sku.code} are on hand.")
     return proposal.model_dump()
 
@@ -121,6 +132,43 @@ def _execute_write_off(db: Session, decision: Decision) -> None:
     )
 
 
+def _execute_markdown(db: Session, decision: Decision) -> None:
+    """Put the oldest stock on clearance; write it down to net realizable value if below cost."""
+    proposal = MarkdownProposal.model_validate(decision.payload)
+    sku = db.get(Sku, proposal.sku_id)
+    if sku is None:
+        raise DecisionError("The SKU on this decision no longer exists.")
+    if proposal.quantity > sku.on_hand:
+        raise DecisionError(f"Only {sku.on_hand} units of {sku.code} are on hand now.")
+
+    nrv = round(proposal.clearance_price * (1 - SELLING_COST_RATE), 2)
+    remaining, writedown = proposal.quantity, 0.0
+    for lot in list(sku.lots):  # oldest first
+        if remaining == 0:
+            break
+        take = min(lot.quantity, remaining)
+        remaining -= take
+        if lot.unit_cost <= nrv:
+            continue
+        writedown += take * (lot.unit_cost - nrv)
+        if take < lot.quantity:  # split: the marked-down units become their own lot at NRV
+            lot.quantity -= take
+            sku.lots.append(InventoryLot(received_date=lot.received_date, quantity=take, unit_cost=nrv))
+        else:
+            lot.unit_cost = nrv
+    writedown = round(writedown, 2)
+    if writedown > 0:
+        decision.journal_entry = ledger.post_entry(
+            db,
+            entry_date=settings.as_of,
+            memo=f"Markdown of {proposal.quantity} × {sku.code} to ${proposal.clearance_price:.2f}: write-down to NRV ${nrv:.2f}",
+            ledger="financial",
+            source_type="markdown_writedown",
+            source_id=decision.id,
+            lines=[ledger.Line("5160", debit=writedown), ledger.Line("1300", credit=writedown)],
+        )
+
+
 def apply_overrides(db: Session, decision: Decision, quantity: int | None, vendor_id: int | None) -> None:
     """Admin edits before approval. Changing vendor re-prices at that vendor's price index."""
     if quantity is None and vendor_id is None:
@@ -138,9 +186,14 @@ def apply_overrides(db: Session, decision: Decision, quantity: int | None, vendo
             payload["vendor_id"] = vendor_id
             payload["unit_cost"] = round(sku.unit_cost * vendor.price_index, 2)
     decision.payload = validate_payload(db, decision.kind, payload)
+    sku = db.get(Sku, payload["sku_id"])
     if decision.kind == "purchase_order":
-        sku, vendor = db.get(Sku, payload["sku_id"]), db.get(Vendor, payload["vendor_id"])
+        vendor = db.get(Vendor, payload["vendor_id"])
         decision.title = f"Order {payload['quantity']:,} × {sku.name} from {vendor.name}"
+    elif decision.kind == "markdown":
+        decision.title = f"Mark down {payload['quantity']:,} aged × {sku.name} to ${payload['clearance_price']:.2f}"
+    else:
+        decision.title = f"Write off {payload['quantity']:,} aged × {sku.name}"
 
 
 def approve(
@@ -153,6 +206,8 @@ def approve(
         apply_overrides(db, decision, quantity, vendor_id)
         if decision.kind == "purchase_order":
             _execute_purchase_order(db, decision)
+        elif decision.kind == "markdown":
+            _execute_markdown(db, decision)
         else:
             _execute_write_off(db, decision)
         decision.status = "approved"

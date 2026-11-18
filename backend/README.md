@@ -33,6 +33,7 @@ LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 | `planning.py` | FY targets: revenue → purchase budget; emission target → gap and ranked reduction levers |
 | `forecasting.py` | LightGBM weekly demand forecast per SKU, backtested against a naive baseline |
 | `recommendations.py` | Reorder timing, quantity and vendor choice per SKU; creates pending PO decisions |
+| `writeoffs.py` | Aging stock: hold vs. markdown cash comparison; raises write-off and markdown decisions |
 | `seed.py` | Deterministic synthetic dataset (2 years of weekly sales, stock lots, PO history) |
 
 ## Accounting treatment on approval
@@ -40,6 +41,7 @@ LightGBM on macOS needs the OpenMP runtime: `brew install libomp`.
 | Event | Entry | Ledger |
 | --- | --- | --- |
 | Write-off approved | Dr 5150 Inventory write-off expense / Cr 1300 Inventory (oldest stock first) | financial |
+| Markdown approved, clearance price below cost | Dr 5160 Inventory write-down / Cr 1300 Inventory, down to net realizable value (clearance price less selling costs) | financial |
 | PO approved | Dr 9100 Purchase commitments / Cr 9200 Reserve for commitments | memo |
 | PO received | Dr 1300 Inventory / Cr 2100 Goods received not invoiced, and the commitment is released | financial |
 

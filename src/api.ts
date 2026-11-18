@@ -163,28 +163,36 @@ export type JournalEntry = {
   lines: { account_code: string; account_name: string; debit: number; credit: number }[]
 }
 
+type PoDetails = {
+  order_by: string | null
+  stockout_date: string | null
+  on_order: number
+  kg_co2e: number
+  vendor_options: VendorOption[]
+  weights: Record<string, number>
+}
+
+type AgingDetails = {
+  aged_units: number
+  aged_value: number
+  oldest_days: number
+  unit_price: number
+  hold: AgingScenario
+  markdown: AgingScenario
+}
+
 export type Decision = {
   id: number
-  kind: 'purchase_order' | 'write_off'
+  kind: 'purchase_order' | 'write_off' | 'markdown'
   status: 'pending' | 'approved' | 'rejected'
   title: string
   reason: string
   impact_usd: number
   source: 'manual' | 'model'
-  payload: { sku_id: number; quantity: number; vendor_id?: number; unit_cost?: number }
-  details: {
-    sku_code: string
-    category: string
-    confidence: 'High' | 'Medium' | 'Low'
-    order_by: string | null
-    stockout_date: string | null
-    on_hand: number
-    on_order: number
-    amount: number
-    kg_co2e: number
-    vendor_options: VendorOption[]
-    weights: Record<string, number>
-  } | null
+  payload: { sku_id: number; quantity: number; vendor_id?: number; unit_cost?: number; clearance_price?: number }
+  // Model evidence; which fields exist depends on `kind`.
+  details: ({ sku_code: string; category: string; confidence: 'High' | 'Medium' | 'Low'; on_hand: number; amount: number }
+    & Partial<PoDetails> & Partial<AgingDetails>) | null
   created_at: string
   decided_at: string | null
   decided_by: string | null
@@ -192,6 +200,42 @@ export type Decision = {
   last_error: string | null
   purchase_order: { id: number; number: string; vendor: string; quantity: number; amount: number; external_system: string | null; expected_date: string } | null
   journal_entry: JournalEntry | null
+}
+
+export type AgingScenario = {
+  aged_sold: number
+  aged_revenue: number
+  newer_revenue: number
+  weeks_to_clear: number | null
+  holding_cost: number
+  write_off_units: number
+  write_off_cost: number
+  cash: number
+}
+
+export type AgingPlan = {
+  sku_id: number
+  sku_code: string
+  sku_name: string
+  category: string
+  aged_units: number
+  aged_value: number
+  oldest_days: number
+  unit_price: number
+  clearance_price: number
+  hold: AgingScenario
+  markdown: AgingScenario
+  recommendation: 'hold' | 'write_off' | 'markdown'
+  cash_gain_vs_hold: number
+  reason: string
+  actions: { kind: 'write_off' | 'markdown'; quantity: number; value: number; clearance_price?: number }[]
+}
+
+export type WriteOffRun = {
+  as_of: string
+  assumptions: Record<string, number>
+  plans: AgingPlan[]
+  totals: { aged_units: number; aged_value: number; write_off_cost: number; markdown_revenue: number; cash_gain_vs_hold: number }
 }
 
 export type SkuPlan = {

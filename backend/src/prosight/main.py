@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import inspect, select
 
-from .api import actions, planning, recommendations, reporting
+from .api import actions, planning, recommendations, reporting, writeoffs
 from .db import Base, SessionLocal, engine
 from .models import Category
 from .seed import seed
@@ -52,3 +52,4 @@ app.include_router(reporting.router, prefix="/api")
 app.include_router(actions.router, prefix="/api")
 app.include_router(planning.router, prefix="/api")
 app.include_router(recommendations.router, prefix="/api")
+app.include_router(writeoffs.router, prefix="/api")
