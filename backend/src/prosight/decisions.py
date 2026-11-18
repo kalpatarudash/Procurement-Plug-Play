@@ -54,6 +54,19 @@ def validate_payload(db: Session, kind: str, payload: dict) -> dict:
     return proposal.model_dump()
 
 
+REJECTION_SNOOZE = timedelta(days=7)
+
+
+def skus_on_hold(db: Session, kinds: tuple[str, ...]) -> set[int]:
+    """SKUs the model should not raise new decisions for: one is already pending, or the admin
+    rejected one in the last week (so a re-run doesn't immediately re-propose it)."""
+    recent = datetime.now(UTC) - REJECTION_SNOOZE
+    return set(db.scalars(select(Decision.payload["sku_id"].as_integer()).where(
+        Decision.kind.in_(kinds),
+        (Decision.status == "pending") | ((Decision.status == "rejected") & (Decision.decided_at >= recent)),
+    )))
+
+
 def _next_po_number(db: Session) -> str:
     count = db.scalar(select(func.count()).select_from(PurchaseOrder)) or 0
     return f"PO-{settings.as_of.year}-{count + 1:04d}"

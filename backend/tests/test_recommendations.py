@@ -72,6 +72,21 @@ def test_raise_upcoming_early_survives_refresh(client):
     assert r.json()["id"] in pending_ids
 
 
+def test_rejected_recommendations_are_not_re_raised(client):
+    client.post("/api/recommendations/refresh")
+    client.post("/api/writeoffs/refresh")
+    pending = client.get("/api/decisions", params={"status": "pending"}).json()
+    po = next(d for d in pending if d["kind"] == "purchase_order")
+    wo = next(d for d in pending if d["kind"] == "write_off")
+    for d in (po, wo):
+        assert client.post(f"/api/decisions/{d['id']}/reject", json={"rejected_by": "Olivia Hayes"}).status_code == 200
+    client.post("/api/recommendations/refresh")
+    client.post("/api/writeoffs/refresh")
+    again = client.get("/api/decisions", params={"status": "pending"}).json()
+    assert not any(d["kind"] == "purchase_order" and d["payload"]["sku_id"] == po["payload"]["sku_id"] for d in again)
+    assert not any(d["kind"] in ("write_off", "markdown") and d["payload"]["sku_id"] == wo["payload"]["sku_id"] for d in again)
+
+
 def test_raise_rejected_when_nothing_needed(client):
     covered = next(p for p in _run(client)["plans"] if p["status"] == "overstocked")
     assert client.post(f"/api/recommendations/{covered['sku_id']}/raise").status_code == 409

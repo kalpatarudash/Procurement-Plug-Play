@@ -55,9 +55,6 @@ function formatDate(iso: string) {
   return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-const monthPoints = [38, 43, 40, 50, 53, 58, 55, 66, 72, 69, 79, 84]
-const chartPath = monthPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${index * 62 + 8} ${145 - point}`).join(' ')
-
 function Metric({ label, value, detail, tone = 'green' }: { label: string; value: string; detail: string; tone?: 'green' | 'orange' | 'blue' }) {
   return (
     <div className="metric-card">
@@ -69,52 +66,93 @@ function Metric({ label, value, detail, tone = 'green' }: { label: string; value
   )
 }
 
-function Overview({ setTab }: { setTab: (tab: Tab) => void }) {
+const STATUS_CLASS: Record<string, string> = { Overstocked: 'status-0', 'Stockout risk': 'status-0', Healthy: 'status-1', Aging: 'status-2' }
+const DECISION_KIND: Record<Decision['kind'], string> = { purchase_order: 'Purchase order', write_off: 'Write-off', markdown: 'Markdown' }
+
+/** Monthly revenue line for the fiscal year so far; a partial current month is left off. */
+function RevenueChart({ months, asOf }: { months: { month: string; revenue: number }[]; asOf: string }) {
+  const complete = months.filter(m => m.month.slice(0, 7) !== asOf.slice(0, 7))
+  if (complete.length < 2) return <p className="chart-empty">Not enough complete months to chart yet.</p>
+  const max = Math.max(...complete.map(m => m.revenue))
+  const min = Math.min(...complete.map(m => m.revenue))
+  const span = max - min || 1
+  const step = 684 / (complete.length - 1)
+  const path = complete.map((m, i) => `${i === 0 ? 'M' : 'L'} ${8 + i * step} ${140 - ((m.revenue - min) / span) * 110}`).join(' ')
+  return (
+    <div className="chart-wrap">
+      <svg viewBox="0 0 700 160" preserveAspectRatio="none" aria-label="Monthly revenue chart">
+        <defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#40786d" stopOpacity=".24" /><stop offset="1" stopColor="#40786d" stopOpacity="0" /></linearGradient></defs>
+        {[30, 70, 110, 150].map(y => <line key={y} x1="0" x2="700" y1={y} y2={y} className="grid-line" />)}
+        <path d={`${path} L ${8 + (complete.length - 1) * step} 155 L 8 155 Z`} fill="url(#area)" />
+        <path d={path} className="chart-line" />
+      </svg>
+      <div className="chart-labels">{complete.map(m => <span key={m.month} title={formatMoney(m.revenue)}>{formatDate(m.month).split(' ')[0]}</span>)}</div>
+    </div>
+  )
+}
+
+function Overview({ setTab, period, pending }: { setTab: (tab: Tab) => void; period: Period; pending: Decision[] | null }) {
+  const fin = useApi<Financials>(`/financials?${periodQuery(period)}`)
+  const ytd = useApi<Financials>('/financials?view=YTD')
+  const inv = useApi<Inventory>('/inventory')
+  const openPos = useApi<{ amount: number }[]>('/purchase-orders?status=open&limit=1000')
+  const failed = fin.error || ytd.error || inv.error || openPos.error
+  if (!fin.data || !ytd.data || !inv.data || !openPos.data) {
+    return <LoadState error={failed} onRetry={() => { fin.reload(); ytd.reload(); inv.reload(); openPos.reload() }} />
+  }
+
+  const c = fin.data.current
+  const [y, m, d] = inv.data.as_of.split('-').map(Number)
+  const today = new Date(y, m - 1, d)
+  const planYear = m >= 7 ? y + 2 : y + 1 // fiscal years start in July and are named by the year they end
+  const committed = openPos.data.reduce((sum, po) => sum + po.amount, 0)
+  const actions = [...(pending ?? [])].sort((a, b) => b.impact_usd - a.impact_usd)
+  const impact = actions.reduce((sum, a) => sum + a.impact_usd, 0)
+  const top = actions[0]
+  const attention = [...inv.data.categories].sort((a, b) => Number(a.status === 'Healthy') - Number(b.status === 'Healthy') || b.stock_value - a.stock_value).slice(0, 3)
+  const ytdData = ytd.data
+
   return (
     <>
       <section className="hero">
         <div>
-          <span className="eyebrow">MONDAY, 16 JUNE</span>
-          <h1>Good morning, Olivia.</h1>
+          <span className="eyebrow">{today.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase()}</span>
+          <h1>Good morning, {CURRENT_USER.split(' ')[0]}.</h1>
           <p>Here’s what needs your attention across procurement and finance.</p>
         </div>
-        <button className="primary-button" onClick={() => setTab('budget')}>Plan FY 2026 <Icon name="arrow" /></button>
+        <button className="primary-button" onClick={() => setTab('budget')}>Plan FY {planYear} <Icon name="arrow" /></button>
       </section>
 
       <section className="metrics-grid">
-        <Metric label="Revenue" value="$4.82M" detail="+12.4% vs last year" />
-        <Metric label="Net income" value="$684K" detail="+8.2% vs last year" tone="blue" />
-        <Metric label="Inventory value" value="$1.24M" detail="8.6% aging stock" tone="orange" />
-        <Metric label="Open purchase orders" value="24" detail="$318K committed" tone="blue" />
+        <Metric label={`Revenue · ${fin.data.label}`} value={formatMoney(c.revenue)} detail={`${formatSignedPct(fin.data.revenue_growth)} vs last year`} />
+        <Metric label={`Net income · ${fin.data.label}`} value={formatMoney(c.net_income)} detail={`${formatSignedPct(fin.data.net_income_growth)} vs last year`} tone="blue" />
+        <Metric label="Inventory value" value={formatMoney(inv.data.total_value)} detail={`${formatPct(inv.data.aged_share)} aging stock`} tone="orange" />
+        <Metric label="Open purchase orders" value={openPos.data.length.toLocaleString()} detail={`${formatMoney(committed)} committed`} tone="blue" />
       </section>
 
       <div className="content-grid">
         <section className="panel forecast-panel">
           <div className="panel-heading">
-            <div><span className="eyebrow">PERFORMANCE</span><h2>Revenue forecast</h2></div>
+            <div><span className="eyebrow">PERFORMANCE</span><h2>Revenue by month</h2></div>
             <button className="text-button" onClick={() => setTab('financials')}>View financials <Icon name="arrow" size={15} /></button>
           </div>
-          <div className="chart-summary"><strong>$5.46M</strong><span>Projected FY revenue</span><b>+13.3%</b></div>
-          <div className="chart-wrap">
-            <svg viewBox="0 0 700 160" preserveAspectRatio="none" aria-label="Revenue forecast chart">
-              <defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#40786d" stopOpacity=".24" /><stop offset="1" stopColor="#40786d" stopOpacity="0" /></linearGradient></defs>
-              {[30, 70, 110, 150].map(y => <line key={y} x1="0" x2="700" y1={y} y2={y} className="grid-line" />)}
-              <path d={`${chartPath} L 690 155 L 8 155 Z`} fill="url(#area)" />
-              <path d={chartPath} className="chart-line" />
-            </svg>
-            <div className="chart-labels">{['Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'].map(m => <span key={m}>{m}</span>)}</div>
-          </div>
+          <div className="chart-summary"><strong>{formatMoney(ytdData.current.revenue)}</strong><span>Fiscal year to date</span><b>{formatSignedPct(ytdData.revenue_growth)}</b></div>
+          <RevenueChart months={ytdData.monthly_revenue} asOf={inv.data.as_of} />
         </section>
 
         <section className="panel ai-panel">
           <div className="ai-mark"><Icon name="spark" size={20} /></div>
           <span className="eyebrow">PROCURE AI</span>
-          <h2>3 actions could protect $126K in margin</h2>
-          <p>Based on your current inventory, supplier performance, and sales forecast.</p>
-          <div className="mini-action">
-            <span className="alert-dot"><Icon name="alert" size={16} /></span>
-            <div><strong>Reduce Spring Outerwear PO</strong><small>Demand forecast is 18% below plan</small></div>
-          </div>
+          {pending === null ? <h2>Checking the latest forecast…</h2>
+            : actions.length === 0 ? <h2>No actions waiting for approval</h2>
+            : <h2>{actions.length} action{actions.length === 1 ? '' : 's'} worth {formatMoney(impact)} waiting for approval</h2>}
+          <p>From the demand forecast, your FY plan, and aging stock.</p>
+          {top && (
+            <div className="mini-action">
+              <span className="alert-dot"><Icon name="alert" size={16} /></span>
+              <div><strong>{top.title}</strong><small>{DECISION_KIND[top.kind]} · {formatMoney(top.impact_usd)} impact</small></div>
+            </div>
+          )}
           <button className="dark-button" onClick={() => setTab('recommendations')}>Review recommendations <Icon name="arrow" /></button>
         </section>
       </div>
@@ -125,16 +163,13 @@ function Overview({ setTab }: { setTab: (tab: Tab) => void }) {
           <button className="text-button" onClick={() => setTab('inventory')}>View all inventory <Icon name="arrow" size={15} /></button>
         </div>
         <div className="table-head"><span>Category</span><span>Stock value</span><span>Sell-through</span><span>Status</span><span>Suggested action</span></div>
-        {[
-          ['Spring Outerwear', '$142,680', '42%', 'Overstocked', 'Reduce next PO by 28%'],
-          ['Classic Footwear', '$88,240', '81%', 'Healthy', 'Reorder within 12 days'],
-          ['Accessories', '$64,920', '36%', 'Aging', 'Bundle slow-moving SKUs'],
-        ].map((row, index) => (
-          <div className="table-row" key={row[0]}>
-            <span><i className={`category-swatch s${index}`} />{row[0]}</span>
-            <span>{row[1]}</span><span>{row[2]}</span>
-            <span><b className={`status status-${index}`}>{row[3]}</b></span>
-            <span>{row[4]}</span>
+        {attention.map((category, index) => (
+          <div className="table-row" key={category.name}>
+            <span><i className={`category-swatch s${index}`} />{category.name}</span>
+            <span>${Math.round(category.stock_value).toLocaleString()}</span>
+            <span>{formatPct(category.sell_through, 0)}</span>
+            <span><b className={`status ${STATUS_CLASS[category.status] ?? 'status-1'}`}>{category.status}</b></span>
+            <span>{category.suggested_action}</span>
           </div>
         ))}
       </section>
@@ -233,7 +268,7 @@ function Budget() {
       </div>
       <section className="panel emission-plan">
         <div className="emission-plan-heading">
-          <div><span className="eyebrow">EMISSIONS CONTROL PLAN</span><h2>Align carbon reduction with the operating budget</h2><p>Baseline: {em.baseline.total.toLocaleString()} tCO₂e over the last 12 months. The cheapest levers that close the gap are selected.</p></div>
+          <div><span className="eyebrow">EMISSIONS CONTROL PLAN</span><h2>Align carbon reduction with the operating budget</h2><p>Baseline: {Math.round(em.baseline.total).toLocaleString()} tCO₂e over the last 12 months. The cheapest levers that close the gap are selected.</p></div>
           <div className="emission-target"><small>FY {a.fiscal_year} TARGET</small><strong>−{reduction}%</strong><span>{Math.round(em.target_total).toLocaleString()} tCO₂e target · {Math.round(em.projected.total).toLocaleString()} projected</span></div>
         </div>
         <div className="emission-control">
@@ -422,8 +457,13 @@ function RaiseRequestModal({ run, onClose, onCreated }: { run: RecommendationRun
   )
 }
 
-function Recommendations({ onPendingChange }: { onPendingChange: (count: number) => void }) {
-  const pending = useApi<Decision[]>('/decisions?status=pending')
+type ModelRefresh = { orders: { created: number; run: RecommendationRun }; aging: { created: number; run: WriteOffRun } }
+
+function Recommendations({ pending, reloadPending, refreshModels }: {
+  pending: Decision[] | null
+  reloadPending: () => Promise<void>
+  refreshModels: () => Promise<ModelRefresh>
+}) {
   const approved = useApi<Decision[]>('/decisions?status=approved')
   const [run, setRun] = useState<RecommendationRun | null>(null)
   const [agingRun, setAgingRun] = useState<WriteOffRun | null>(null)
@@ -432,30 +472,36 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
   const [notice, setNotice] = useState<string | null>(null)
   const [requestOpen, setRequestOpen] = useState(false)
   const [raising, setRaising] = useState<number | null>(null)
-  const reloadPending = pending.reload
   const reloadApproved = approved.reload
 
-  const refresh = useCallback(async (announce: boolean) => {
+  // Read-only view of the latest model output (decisions are raised by refreshModels).
+  const loadRuns = useCallback(async () => {
+    setRunError(null)
+    try {
+      const [orders, aging] = await Promise.all([api<RecommendationRun>('/recommendations'), api<WriteOffRun>('/writeoffs')])
+      setRun(orders)
+      setAgingRun(aging)
+    } catch (e) {
+      setRunError((e as Error).message)
+    }
+  }, [])
+
+  const refresh = async () => {
     setRefreshing(true)
     setRunError(null)
     try {
-      const [orders, aging] = await Promise.all([
-        api<{ created: number; run: RecommendationRun }>('/recommendations/refresh', { method: 'POST' }),
-        api<{ created: number; run: WriteOffRun }>('/writeoffs/refresh', { method: 'POST' }),
-      ])
+      const { orders, aging } = await refreshModels()
       setRun(orders.run)
       setAgingRun(aging.run)
-      if (announce) setNotice(`Model re-run: ${orders.created} order${orders.created === 1 ? '' : 's'} and ${aging.created} aging-stock action${aging.created === 1 ? '' : 's'} recommended.`)
-      reloadPending()
+      setNotice(`Model re-run: ${orders.created} order${orders.created === 1 ? '' : 's'} and ${aging.created} aging-stock action${aging.created === 1 ? '' : 's'} recommended.`)
     } catch (e) {
       setRunError((e as Error).message)
     } finally {
       setRefreshing(false)
     }
-  }, [reloadPending])
+  }
 
-  useEffect(() => { refresh(false) }, [refresh])
-  useEffect(() => { if (pending.data) onPendingChange(pending.data.length) }, [pending.data, onPendingChange])
+  useEffect(() => { loadRuns() }, [loadRuns])
 
   const onChanged = (updated: Decision) => {
     if (updated.status === 'approved' && updated.purchase_order) {
@@ -472,7 +518,7 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
     }
     reloadPending()
     reloadApproved()
-    refresh(false)
+    loadRuns()
   }
 
   const raiseEarly = async (skuId: number) => {
@@ -487,7 +533,7 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
     }
   }
 
-  const items = pending.data ?? []
+  const items = [...(pending ?? [])].sort((a, b) => b.impact_usd - a.impact_usd)
   const totalImpact = items.reduce((sum, d) => sum + d.impact_usd, 0)
   const pendingSkus = new Set(items.map(d => d.payload.sku_id))
   const upcoming = run?.plans.filter(p => p.status === 'upcoming') ?? []
@@ -500,13 +546,13 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
         <div><span className="eyebrow">AGENTIC INSIGHTS</span><h1>Actions, not just answers.</h1><p>Purchase orders, markdowns and write-offs from the demand forecast. Approved decisions post to your book of record.</p></div>
         <div className="hero-actions">
           <div className="impact-pill"><Icon name="spark" /> {formatMoney(totalImpact)} potential impact</div>
-          <button className="secondary-button" disabled={refreshing} onClick={() => refresh(true)}>{refreshing ? 'Running model…' : 'Re-run model'}</button>
+          <button className="secondary-button" disabled={refreshing} onClick={refresh}>{refreshing ? 'Running model…' : 'Re-run model'}</button>
           <button className="primary-button" onClick={() => setRequestOpen(true)}>+ Raise purchase request</button>
         </div>
       </section>
       {notice && <p className="decision-notice" role="status"><Icon name="check" size={14} /> {notice}</p>}
-      {runError && <LoadState error={runError} onRetry={() => refresh(false)} />}
-      {!pending.data ? <LoadState error={pending.error} onRetry={pending.reload} /> : (
+      {runError && <LoadState error={runError} onRetry={loadRuns} />}
+      {!pending ? <LoadState error={null} onRetry={reloadPending} /> : (
         <div className="recommendation-list">
           {items.length === 0 && <section className="panel empty-state">No decisions waiting. The model will raise orders as stock approaches its reorder point.</section>}
           {items.map((d, i) => <DecisionCard key={d.id} decision={d} rank={i + 1} onChanged={onChanged} />)}
@@ -543,7 +589,7 @@ function Recommendations({ onPendingChange }: { onPendingChange: (count: number)
               <span>{p.oldest_days} days</span>
               <span className={p.recommendation !== 'markdown' ? 'best' : ''}>{formatMoney(p.hold.cash)} · {p.hold.write_off_units.toLocaleString()} units</span>
               <span className={p.recommendation === 'markdown' ? 'best' : ''}>{formatMoney(p.markdown.cash)} · {p.markdown.write_off_units.toLocaleString()} units</span>
-              <span><b className={`aging-tag ${p.recommendation}`}>{p.recommendation === 'markdown' ? 'Mark down' : p.recommendation === 'write_off' ? 'Write off excess' : 'Hold'}</b></span>
+              <span><b className={`aging-tag ${p.recommendation}`}>{p.recommendation === 'markdown' ? 'Mark down' : p.recommendation === 'write_off' ? (p.hold.write_off_units === p.aged_units ? 'Write off all' : 'Write off excess') : 'Hold'}</b></span>
             </div>
           ))}
           <p className="source-note">
@@ -719,15 +765,32 @@ function DetailPage({ type, period }: { type: 'inventory' | 'financials'; period
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('overview')
-  const [pendingCount, setPendingCount] = useState<number | null>(null)
-  useEffect(() => {
-    api<Decision[]>('/decisions?status=pending').then(d => setPendingCount(d.length)).catch(() => setPendingCount(null))
+  // Pending decisions are shared by the Overview, the sidebar badge and the Decisions tab.
+  const [pending, setPending] = useState<Decision[] | null>(null)
+  const reloadPending = useCallback(async () => {
+    try {
+      setPending(await api<Decision[]>('/decisions?status=pending'))
+    } catch {
+      setPending(null)
+    }
   }, [])
+  const refreshModels = useCallback(async (): Promise<ModelRefresh> => {
+    const [orders, aging] = await Promise.all([
+      api<ModelRefresh['orders']>('/recommendations/refresh', { method: 'POST' }),
+      api<ModelRefresh['aging']>('/writeoffs/refresh', { method: 'POST' }),
+    ])
+    await reloadPending()
+    return { orders, aging }
+  }, [reloadPending])
+  // Run the models once on load so the latest recommendations are waiting for approval.
+  useEffect(() => { refreshModels().catch(() => reloadPending()) }, [refreshModels, reloadPending])
+  const pendingCount = pending?.length
   const [dateView, setDateView] = useState('YTD')
   const [customDates, setCustomDates] = useState(false)
   const [appliedRange, setAppliedRange] = useState<{ from: string; to: string } | null>(null)
   const [draftRange, setDraftRange] = useState({ from: '2025-01-01', to: '2025-06-16' })
   const rangeInvalid = !draftRange.from || !draftRange.to || draftRange.from > draftRange.to
+  const period: Period = customDates && appliedRange ? { start: appliedRange.from, end: appliedRange.to } : { view: dateView as 'YTD' | 'QTD' | 'MTD' }
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -749,10 +812,10 @@ export default function App() {
           {customDates && <div className="custom-dates"><label>From<input type="date" value={draftRange.from} max={draftRange.to || undefined} aria-invalid={rangeInvalid} onChange={e => setDraftRange(r => ({ ...r, from: e.target.value }))} /></label><span>→</span><label>To<input type="date" value={draftRange.to} min={draftRange.from || undefined} aria-invalid={rangeInvalid} onChange={e => setDraftRange(r => ({ ...r, to: e.target.value }))} /></label><button disabled={rangeInvalid} onClick={() => setAppliedRange(draftRange)}>Apply</button></div>}
         </div>
         <div className="page">
-          {tab === 'overview' && <Overview setTab={setTab} />}
+          {tab === 'overview' && <Overview setTab={setTab} period={period} pending={pending} />}
           {tab === 'budget' && <Budget />}
-          {tab === 'recommendations' && <Recommendations onPendingChange={setPendingCount} />}
-          {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} period={customDates && appliedRange ? { start: appliedRange.from, end: appliedRange.to } : { view: dateView as 'YTD' | 'QTD' | 'MTD' }} />}
+          {tab === 'recommendations' && <Recommendations pending={pending} reloadPending={reloadPending} refreshModels={refreshModels} />}
+          {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} period={period} />}
         </div>
       </main>
     </div>

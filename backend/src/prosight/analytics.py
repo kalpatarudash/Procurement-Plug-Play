@@ -76,11 +76,16 @@ def financial_summary(db: Session, start: date, end: date) -> FinancialSummary:
 
 
 def monthly_revenue(db: Session, start: date, end: date) -> list[tuple[date, float]]:
+    """Revenue by calendar month. Each week's revenue is spread evenly over its seven days, so a
+    month gets exactly its own days (bucketing whole weeks by start date makes months with five
+    week-starts look like spikes)."""
     totals: dict[date, float] = defaultdict(float)
     for week_start, revenue in db.execute(
         select(SalesWeek.week_start, SalesWeek.revenue).where(SalesWeek.week_start.between(start, end))
     ):
-        totals[week_start.replace(day=1)] += revenue
+        for offset in range(7):
+            day = week_start + timedelta(days=offset)
+            totals[day.replace(day=1)] += revenue / 7
     return sorted(totals.items())
 
 

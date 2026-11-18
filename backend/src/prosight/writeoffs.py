@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from . import forecasting
 from .config import settings
-from .decisions import SELLING_COST_RATE
+from .decisions import SELLING_COST_RATE, skus_on_hold
 from .models import Decision, Sku
 from .recommendations import _confidence
 
@@ -267,10 +267,8 @@ def refresh_decisions(db: Session) -> tuple[WriteOffRun, list[Decision]]:
         Decision.source == "model", Decision.kind.in_(KINDS), Decision.status == "pending",
         Decision.details["raised_by"].as_string() == "refresh",
     ))
-    busy = set(db.scalars(select(Decision.payload["sku_id"].as_integer()).where(
-        Decision.kind.in_(KINDS), Decision.status == "pending"
-    )))
-    created = [_decision(p, act, "refresh") for p in run.plans if p.sku_id not in busy for act in p.actions]
+    on_hold = skus_on_hold(db, KINDS)
+    created = [_decision(p, act, "refresh") for p in run.plans if p.sku_id not in on_hold for act in p.actions]
     db.add_all(created)
     db.commit()
     return run, created

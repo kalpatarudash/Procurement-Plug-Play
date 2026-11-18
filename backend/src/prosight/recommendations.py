@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from . import emissions, forecasting, planning
 from .config import settings
+from .decisions import skus_on_hold
 from .models import Decision, PurchaseOrder, Sku, Vendor
 
 SERVICE_LEVEL_Z = 1.65  # ≈95% cycle service level
@@ -328,10 +329,9 @@ def refresh_decisions(db: Session) -> tuple[RecommendationRun, list[Decision]]:
         Decision.source == "model", Decision.kind == "purchase_order", Decision.status == "pending",
         Decision.details["raised_by"].as_string() == "refresh",
     ))
-    pending_skus = set(db.scalars(select(Decision.payload["sku_id"].as_integer()).where(
-        Decision.kind == "purchase_order", Decision.status == "pending"
-    )))
-    created = [_decision_from_plan(p, run, "refresh") for p in run.plans if p.status == "order_now" and p.vendor and p.quantity > 0 and p.sku_id not in pending_skus]
+    on_hold = skus_on_hold(db, ("purchase_order",))
+    created = [_decision_from_plan(p, run, "refresh") for p in run.plans
+               if p.status == "order_now" and p.vendor and p.quantity > 0 and p.sku_id not in on_hold]
     db.add_all(created)
     db.commit()
     return run, created
