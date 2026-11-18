@@ -1,0 +1,24 @@
+[project]
+name = "prosight"
+version = "0.1.0"
+description = "Pro-sight procurement FP&A backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.163.2",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.16.3",
+    "sqlalchemy>=2.1.9",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

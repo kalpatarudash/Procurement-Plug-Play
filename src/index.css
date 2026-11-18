@@ -193,6 +193,19 @@ h2 { font-size: 18px; }
 .connector-card > div:nth-child(2) { display: flex; flex-direction: column; }.connector-card div > span { color: #8a9591; font-size: 7px; font-weight: 700; letter-spacing: .8px; }.connector-card div > strong { color: #30453f; font-size: 11px; margin: 2px 0; }.connector-card p { color: #8a9591; font-size: 8px; margin: 0; }
 .connector-card button, .browse-connectors { border: 1px solid #d4ddd8; background: white; color: #3c655b; border-radius: 6px; padding: 7px 9px; font-size: 8px; font-weight: 700; display: flex; align-items: center; gap: 4px; }.connector-card.connected button { color: #36715f; background: #e5f0e7; border-color: #cee1d2; }
 .browse-connectors { margin: 15px auto 0; border: 0; font-size: 9px; }
+.connector-card p.connector-error, .inline-error { color: #a4442f; font-size: 9px; margin-top: 4px; }
+.connector-card button:disabled { opacity: .6; cursor: progress; }
+.load-state { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; color: #687570; font-size: 12px; }
+.load-state > svg { color: #c06a2c; flex: none; }
+.load-state div { flex: 1; }
+.load-state strong { color: #2f413c; }
+.load-state p { margin: 4px 0 0; }
+.load-state code { background: #f1f4f0; border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+.period-note { color: #7d8985; font-size: 11px; font-weight: 600; }
+.category-status { color: #8a9591; font-style: normal; font-size: 11px; }
+.saved-note { margin: 14px 0 0; color: #6b7874; font-size: 10px; }
+.carbon-budget-stat span.off-track { color: #a4442f; }
+.source-note { margin: 14px 0 0; color: #8a9591; font-size: 9px; line-height: 1.5; }
 
 @media (max-width: 1000px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }

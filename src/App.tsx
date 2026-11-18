@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { api, formatMoney, formatPct, formatSignedPct, periodQuery, useApi, type ConnectorInfo, type Emissions, type Financials, type Inventory, type Period, type PlanResponse } from './api'
 
 type IconName =
   | 'grid'
@@ -146,56 +147,123 @@ function Overview({ setTab }: { setTab: (tab: Tab) => void }) {
   )
 }
 
+const SCOPE_LABELS: Record<number, [string, string]> = { 1: ['scope-one', 'OPERATIONS'], 2: ['scope-two', 'ENERGY'], 3: ['scope-three', 'SUPPLY CHAIN'] }
+const CURRENT_USER = 'Olivia Hayes' // until sign-in exists
+
 function Budget() {
-  const [profit, setProfit] = useState(780)
-  const [emissionTarget, setEmissionTarget] = useState(15)
-  const [saved, setSaved] = useState(false)
-  // Required revenue (in $K) assuming a 14% net margin; growth is measured against $4.82M current revenue.
-  const revenue = Math.round(profit / 0.14)
-  const revenueGrowth = Math.round((revenue / 4820 - 1) * 100)
-  const updateProfit = (value: string) => { setProfit(toNumber(value, 0, 100000)); setSaved(false) }
+  const [revenueK, setRevenueK] = useState<number | null>(null)
+  const [reduction, setReduction] = useState<number | null>(null)
+  const [plan, setPlan] = useState<PlanResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [loadKey, setLoadKey] = useState(0)
+
+  // Saved targets (or defaults) on first load.
+  useEffect(() => {
+    let cancelled = false
+    setError(null)
+    api<PlanResponse>('/plan')
+      .then(p => {
+        if (cancelled) return
+        setPlan(p)
+        setRevenueK(Math.round(p.analysis.revenue.target / 1000))
+        setReduction(p.analysis.emissions.reduction_pct)
+      })
+      .catch((e: Error) => { if (!cancelled) setError(e.message) })
+    return () => { cancelled = true }
+  }, [loadKey])
+
+  // Live what-if preview as the sliders move (debounced; stale responses ignored).
+  useEffect(() => {
+    if (revenueK === null || reduction === null || revenueK <= 0) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      api<PlanResponse>(`/plan?revenue_target=${revenueK * 1000}&emission_reduction_pct=${reduction}`)
+        .then(p => { if (!cancelled) { setPlan(p); setError(null) } })
+        .catch((e: Error) => { if (!cancelled) setError(e.message) })
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [revenueK, reduction])
+
+  if (!plan || revenueK === null || reduction === null) return <LoadState error={error} onRetry={() => setLoadKey(k => k + 1)} />
+
+  const a = plan.analysis
+  const { revenue: rev, margins, procurement: proc, emissions: em } = a
+  const isSaved = plan.saved !== null && plan.saved.revenue_target === revenueK * 1000 && plan.saved.emission_reduction_pct === reduction
+  const baselineK = Math.round(rev.baseline / 1000)
+  const sliderMin = Math.round((baselineK * 0.9) / 10) * 10
+  const sliderMax = Math.round((baselineK * 1.5) / 10) * 10
+  const peak = a.monthly.reduce((best, m) => (m.purchase_budget > best.purchase_budget ? m : best), a.monthly[0])
+  const monthName = (iso: string) => formatDate(iso).split(' ')[0]
+  const save = async () => {
+    setSaving(true)
+    try {
+      setPlan(await api<PlanResponse>('/plan', { method: 'PUT', body: JSON.stringify({ revenue_target: revenueK * 1000, emission_reduction_pct: reduction, updated_by: CURRENT_USER }) }))
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <>
       <section className="hero compact">
-        <div><span className="eyebrow">FY 2026 PLANNING</span><h1>Set the year’s ambition.</h1><p>Define your target profit and we’ll align the operating plan around it.</p></div>
-        <button className="primary-button" onClick={() => setSaved(true)} disabled={saved}><Icon name="check" /> {saved ? 'Plan saved' : 'Save plan'}</button>
+        <div><span className="eyebrow">FY {a.fiscal_year} PLANNING</span><h1>Set the year’s ambition.</h1><p>Set your revenue and emissions targets and we’ll align the procurement budget around them.</p></div>
+        <button className="primary-button" onClick={save} disabled={isSaved || saving || revenueK <= 0}><Icon name="check" /> {isSaved ? 'Plan saved' : saving ? 'Saving…' : 'Save plan'}</button>
       </section>
+      {error && <p className="inline-error" role="alert">{error}</p>}
       <div className="budget-grid">
         <section className="panel target-card">
-          <span className="step">01</span><h2>Profit expectation</h2><p>What net income do you want the business to deliver next year?</p>
-          <label htmlFor="profit">Target net income</label>
-          <div className="money-input"><span>$</span><input id="profit" type="number" min="0" value={profit} onChange={e => updateProfit(e.target.value)} /><b>K</b></div>
-          <input className="range" type="range" min="400" max="1200" step="10" value={Math.min(1200, Math.max(400, profit))} onChange={e => updateProfit(e.target.value)} aria-label="Target net income slider" />
-          <div className="range-labels"><span>Conservative · $400K</span><span>Ambitious · $1.2M</span></div>
+          <span className="step">01</span><h2>Revenue target</h2><p>What gross revenue should the business deliver in FY {a.fiscal_year}?</p>
+          <label htmlFor="revenue-target">Target gross revenue</label>
+          <div className="money-input"><span>$</span><input id="revenue-target" type="number" min="1" value={revenueK} onChange={e => setRevenueK(toNumber(e.target.value, 0, baselineK * 10))} /><b>K</b></div>
+          <input className="range" type="range" min={sliderMin} max={sliderMax} step="10" value={Math.min(sliderMax, Math.max(sliderMin, revenueK))} onChange={e => setRevenueK(toNumber(e.target.value, sliderMin, sliderMax))} aria-label="Target gross revenue slider" />
+          <div className="range-labels"><span>Last 12 months · {formatMoney(rev.baseline)}</span><span>Ambitious · {formatMoney(sliderMax * 1000)}</span></div>
+          {plan.saved && <p className="saved-note">Saved {formatMoney(plan.saved.revenue_target)} · −{plan.saved.emission_reduction_pct}% by {plan.saved.updated_by}</p>}
         </section>
         <section className="panel alignment-card">
-          <span className="eyebrow">REQUIRED ALIGNMENT</span><h2>Your path to {formatK(profit)}</h2>
-          <div className="alignment-row"><span>Revenue</span><strong>${(revenue / 1000).toFixed(2)}M</strong><b className={revenueGrowth < 0 ? 'neutral' : ''}>{revenueGrowth >= 0 ? '+' : ''}{revenueGrowth}%</b></div>
-          <div className="alignment-row"><span>Gross margin</span><strong>46.5%</strong><b>+2.1 pts</b></div>
-          <div className="alignment-row"><span>Operating expenses</span><strong>$1.81M</strong><b className="neutral">≤ 32.5%</b></div>
-          <div className="alignment-row"><span>Inventory turns</span><strong>4.8×</strong><b>+0.6×</b></div>
-          <div className="insight"><Icon name="spark" /><p><strong>AI planning insight</strong>Improving supplier terms by 3% would cover 21% of your profit gap.</p></div>
+          <span className="eyebrow">REQUIRED ALIGNMENT</span><h2>Your path to {formatMoney(rev.target)}</h2>
+          <div className="alignment-row"><span>Required growth</span><strong>{formatSignedPct(rev.required_growth)}</strong><b className="neutral">trend {formatSignedPct(rev.trend_growth)}</b></div>
+          <div className="alignment-row"><span>Gross profit</span><strong>{formatMoney(margins.target_gross_profit)}</strong><b className="neutral">{formatPct(margins.gross_margin)} GM</b></div>
+          <div className="alignment-row"><span>Purchase budget</span><strong>{formatMoney(proc.purchase_budget)}</strong><b className={proc.change_vs_baseline !== null && proc.change_vs_baseline < 0 ? 'neutral' : ''}>{formatSignedPct(proc.change_vs_baseline)} vs LY</b></div>
+          <div className="alignment-row"><span>Ending inventory</span><strong>{formatMoney(proc.target_ending_inventory)}</strong><b className="neutral">{proc.inventory_turns.toFixed(1)}× turns</b></div>
+          <div className="insight"><Icon name="spark" /><p><strong>Planning insight</strong>
+            {rev.gap_to_trend > 0
+              ? `Your target is ${formatMoney(rev.gap_to_trend)} above the current trajectory (${formatMoney(rev.projected_at_trend)}), so growth must beat the trend.`
+              : `Your target is within the current trajectory, with ${formatMoney(-rev.gap_to_trend)} of headroom.`}
+            {` Purchases peak in ${monthName(peak.month)} at ${formatMoney(peak.purchase_budget)}.`}</p></div>
         </section>
       </div>
       <section className="panel emission-plan">
         <div className="emission-plan-heading">
-          <div><span className="eyebrow">EMISSIONS CONTROL PLAN</span><h2>Align carbon reduction with the operating budget</h2><p>Set an annual reduction target and fund the actions required across Scope 1, 2, and 3.</p></div>
-          <div className="emission-target"><small>FY 2026 TARGET</small><strong>−{emissionTarget}%</strong><span>{Math.round(3842 * (1 - emissionTarget / 100)).toLocaleString()} tCO₂e projected</span></div>
+          <div><span className="eyebrow">EMISSIONS CONTROL PLAN</span><h2>Align carbon reduction with the operating budget</h2><p>Baseline: {em.baseline.total.toLocaleString()} tCO₂e over the last 12 months. The cheapest levers that close the gap are selected.</p></div>
+          <div className="emission-target"><small>FY {a.fiscal_year} TARGET</small><strong>−{reduction}%</strong><span>{Math.round(em.target_total).toLocaleString()} tCO₂e target · {Math.round(em.projected.total).toLocaleString()} projected</span></div>
         </div>
         <div className="emission-control">
           <div className="emission-slider">
             <label htmlFor="emissions">Target emissions reduction</label>
-            <input id="emissions" type="range" min="5" max="30" step="1" value={emissionTarget} onChange={e => { setEmissionTarget(toNumber(e.target.value, 5, 30)); setSaved(false) }} />
-            <div><span>5% baseline</span><span>30% accelerated</span></div>
+            <input id="emissions" type="range" min="0" max="50" step="1" value={reduction} onChange={e => setReduction(toNumber(e.target.value, 0, 50))} />
+            <div><span>0%</span><span>50% accelerated</span></div>
           </div>
-          <div className="carbon-budget-stat"><small>REQUIRED INVESTMENT</small><strong>${Math.round(84 + emissionTarget * 4.8)}K</strong><span>Estimated payback: 2.4 years</span></div>
-          <div className="carbon-budget-stat"><small>POTENTIAL CREDITS</small><strong>{Math.round(emissionTarget * 142).toLocaleString()}</strong><span>Approx. ${Math.round(emissionTarget * 3.6)}K market value</span></div>
+          <div className="carbon-budget-stat"><small>REQUIRED INVESTMENT</small><strong>{formatMoney(em.investment)}</strong><span>per year for selected levers</span></div>
+          <div className="carbon-budget-stat"><small>GAP TO CLOSE</small><strong>{Math.round(em.gap).toLocaleString()} tCO₂e</strong><span className={em.on_track ? '' : 'off-track'}>{em.gap === 0 ? 'Already on track' : em.on_track ? `Levers cover ${Math.round(em.selected_reduction).toLocaleString()} t` : `${Math.round(em.gap - em.selected_reduction).toLocaleString()} t short with all levers`}</span></div>
         </div>
         <div className="scope-actions">
-          <div><span className="scope-dot scope-one" /><p><small>SCOPE 1 · OPERATIONS</small><strong>Electrify warehouse fleet</strong><span>−96 tCO₂e · $68K budget</span></p><b>Funded</b></div>
-          <div><span className="scope-dot scope-two" /><p><small>SCOPE 2 · ENERGY</small><strong>Move sites to renewable power</strong><span>−184 tCO₂e · $42K budget</span></p><b>Funded</b></div>
-          <div><span className="scope-dot scope-three" /><p><small>SCOPE 3 · SUPPLY CHAIN</small><strong>Prioritize low-emission suppliers</strong><span>−{Math.round(emissionTarget * 21)} tCO₂e · ${Math.round(emissionTarget * 3.2)}K budget</span></p><b className="recommended">Recommended</b></div>
+          {em.levers.map(lever => {
+            const [dot, area] = SCOPE_LABELS[lever.scope]
+            return (
+              <div key={lever.id} title={lever.detail}>
+                <span className={`scope-dot ${dot}`} />
+                <p><small>SCOPE {lever.scope} · {area}{lever.basis === 'assumption' && ' *'}</small><strong>{lever.title}</strong>
+                  <span>−{Math.round(lever.reduction_t).toLocaleString()} tCO₂e · {lever.annual_cost < 0 ? `saves ${formatMoney(-lever.annual_cost)}` : `${formatMoney(lever.annual_cost)}/yr`}</span></p>
+                <b className={lever.selected ? '' : 'recommended'}>{lever.selected ? 'Selected' : 'Optional'}</b>
+              </div>
+            )
+          })}
         </div>
+        <p className="source-note">Scope 3: {em.sources.scope3}. Scope 1–2: {em.sources.scope1_2}. * Uses a stated cost assumption.</p>
       </section>
     </>
   )
@@ -274,48 +342,141 @@ function Recommendations() {
   )
 }
 
-function DetailPage({ type }: { type: 'inventory' | 'financials' }) {
+function LoadState({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  return (
+    <section className="panel load-state">
+      {error
+        ? <><Icon name="alert" /><div><strong>{error}</strong><p>Start it with <code>cd backend && uv run uvicorn prosight.main:app --reload</code></p></div><button className="secondary-button" onClick={onRetry}>Retry</button></>
+        : <p>Loading…</p>}
+    </section>
+  )
+}
+
+function Connectors() {
+  const { data: connectors, error, reload, setData } = useApi<ConnectorInfo[]>('/connectors')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [messages, setMessages] = useState<Record<string, string>>({})
+  const toggle = async (connector: ConnectorInfo) => {
+    setBusy(connector.id)
+    setMessages(m => ({ ...m, [connector.id]: '' }))
+    try {
+      setData(await api<ConnectorInfo[]>(`/connectors/${connector.id}/${connector.connected ? 'disconnect' : 'connect'}`, { method: 'POST' }))
+    } catch (e) {
+      setMessages(m => ({ ...m, [connector.id]: (e as Error).message }))
+    } finally {
+      setBusy(null)
+    }
+  }
+  return (
+    <section className="panel connector-panel">
+      <div className="connector-heading"><div><span className="eyebrow">PLUG-AND-PLAY CONNECTORS</span><h2>Connect your ERP or CRM</h2><p>Pull financials and SKU data in, and post approved POs and write-offs back to your book of record.</p></div><span className="sync-status"><i /> Live sync ready</span></div>
+      {!connectors ? <LoadState error={error} onRetry={reload} /> : (
+        <div className="connector-grid">
+          {connectors.map((connector, i) => (
+            <article className={`connector-card ${connector.connected ? 'connected' : ''}`} key={connector.id}>
+              <div className={`connector-logo logo-${i % 4}`}>{connector.name.split(' ').map(word => word[0]).join('').slice(0, 2)}</div>
+              <div>
+                <span>{connector.kind.toUpperCase()}{connector.is_abor && ' · BOOK OF RECORD'}{connector.is_po_target && ' · PO TARGET'}</span>
+                <strong>{connector.name}</strong>
+                <p>{connector.description}</p>
+                {messages[connector.id] && <p className="connector-error" role="alert">{messages[connector.id]}</p>}
+              </div>
+              <button disabled={busy === connector.id} onClick={() => toggle(connector)}>{connector.connected ? <><Icon name="check" size={14} /> Connected</> : 'Connect'}</button>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function FinancialsPage({ period }: { period: Period }) {
+  const { data, error, reload } = useApi<Financials>(`/financials?${periodQuery(period)}`)
+  if (!data) return <LoadState error={error} onRetry={reload} />
+  const c = data.current
+  return (
+    <>
+      <section className="metrics-grid">
+        <Metric label="Revenue" value={formatMoney(c.revenue)} detail={`${formatSignedPct(data.revenue_growth)} YoY`} />
+        <Metric label="COGS" value={formatMoney(c.cogs)} detail={`${formatPct(c.revenue ? c.cogs / c.revenue : 0)} of revenue`} tone="blue" />
+        <Metric label="Gross profit" value={formatMoney(c.gross_profit)} detail={`${formatPct(c.gross_margin)} margin`} />
+        <Metric label="Net income" value={formatMoney(c.net_income)} detail={`${formatPct(c.net_margin)} margin`} tone="blue" />
+      </section>
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      <section className="panel statement-panel">
+        <div className="panel-heading"><div><span className="eyebrow">INCOME STATEMENT</span><h2>{data.label === 'Custom range' ? 'Custom range' : `FY ${c.end.slice(0, 4)} ${data.label}`}</h2></div><span className="period-note">{formatDate(c.start)} – {formatDate(c.end)}</span></div>
+        {([
+          ['Revenue', c.revenue], ['Cost of goods sold', -c.cogs], ['Gross profit', c.gross_profit],
+          ['Operating expenses', -c.operating_expenses], ['Taxes & interest', -c.taxes_interest], ['Net income', c.net_income],
+        ] as const).map(([label, value], i, all) => (
+          <div className={`statement-row ${i === all.length - 1 ? 'total' : ''}`} key={label}>
+            <span>{label}</span>
+            <strong>{value < 0 ? `($${Math.round(-value).toLocaleString()})` : `$${Math.round(value).toLocaleString()}`}</strong>
+          </div>
+        ))}
+      </section>
+    </>
+  )
+}
+
+function InventoryPage() {
+  const { data, error, reload } = useApi<Inventory>('/inventory')
+  return (
+    <>
+      {!data ? <LoadState error={error} onRetry={reload} /> : (
+        <section className="metrics-grid">
+          <Metric label="Inventory value" value={formatMoney(data.total_value)} detail={`Across ${data.sku_count.toLocaleString()} SKUs`} />
+          <Metric label="Inventory turns" value={`${data.turns.toFixed(1)}×`} detail="Trailing 52 weeks" tone="blue" />
+          <Metric label="Aging stock" value={formatMoney(data.aged_value)} detail={`${formatPct(data.aged_share)} of inventory`} />
+          <Metric label="Stockout risk" value={`${data.stockout_risk_skus} SKUs`} detail="Next 30 days" tone="blue" />
+        </section>
+      )}
+      <Connectors />
+      {data && (
+        <section className="panel statement-panel">
+          <div className="panel-heading"><div><span className="eyebrow">CATEGORY PERFORMANCE</span><h2>Capital by category</h2></div><span className="period-note">As of {formatDate(data.as_of)}</span></div>
+          {data.categories.map(category => (
+            <div className="statement-row" key={category.name}>
+              <span>{category.name} · <em className="category-status">{category.status}</em></span>
+              <strong>${Math.round(category.stock_value).toLocaleString()}</strong>
+            </div>
+          ))}
+          <div className="statement-row total"><span>Total</span><strong>${Math.round(data.total_value).toLocaleString()}</strong></div>
+        </section>
+      )}
+    </>
+  )
+}
+
+function CarbonPanel({ period }: { period: Period }) {
+  const { data, error, reload } = useApi<Emissions>(`/emissions?${periodQuery(period)}`)
+  if (!data) return <LoadState error={error} onRetry={reload} />
+  const c = data.current
+  const share = (v: number) => (c.total ? formatPct(v / c.total) : '0%')
+  const change = data.total_change
+  return (
+    <section className="panel carbon-panel">
+      <div className="panel-heading"><div><span className="eyebrow">CARBON ACCOUNTING</span><h2>Total emissions</h2></div><div className="carbon-total"><strong>{Math.round(c.total).toLocaleString()}</strong><span>tCO₂e · {formatDate(c.start)} – {formatDate(c.end)}</span></div></div>
+      <div className="scope-grid">
+        <div><span className="scope-dot scope-one" /><small>SCOPE 1</small><strong>{Math.round(c.scope1).toLocaleString()} tCO₂e</strong><p>Fuel: fleet and heating</p><b>{share(c.scope1)}</b></div>
+        <div><span className="scope-dot scope-two" /><small>SCOPE 2</small><strong>{Math.round(c.scope2).toLocaleString()} tCO₂e</strong><p>Purchased electricity</p><b>{share(c.scope2)}</b></div>
+        <div><span className="scope-dot scope-three" /><small>SCOPE 3</small><strong>{Math.round(c.scope3).toLocaleString()} tCO₂e</strong><p>Purchased goods (PO spend)</p><b>{share(c.scope3)}</b></div>
+      </div>
+      <div className="carbon-footer">
+        <span><Icon name="trend" size={16} /> {change === null ? 'No prior-year data' : <>Total emissions are <strong>{formatPct(Math.abs(change))} {change <= 0 ? 'lower' : 'higher'}</strong> year over year</>}</span>
+        <b>{c.kg_per_revenue_usd === null ? '' : `${(c.kg_per_revenue_usd * 1000).toFixed(0)} kg CO₂e per $1K revenue`}</b>
+      </div>
+    </section>
+  )
+}
+
+function DetailPage({ type, period }: { type: 'inventory' | 'financials'; period: Period }) {
   const financial = type === 'financials'
-  const [connectedSystems, setConnectedSystems] = useState<string[]>([])
-  const connectors = [
-    ['SAP S/4HANA', 'ERP', 'Sync stock, purchase orders, and suppliers'],
-    ['Oracle NetSuite', 'ERP', 'Sync items, vendors, and order history'],
-    ['Manhattan Active', 'WMS', 'Sync warehouse stock and fulfilment'],
-    ['Microsoft Dynamics 365', 'ERP', 'Sync finance and supply-chain data'],
-  ]
   return (
     <>
       <section className="hero compact"><div><span className="eyebrow">{financial ? 'FINANCIAL STATEMENTS' : 'CONNECTED INVENTORY'}</span><h1>{financial ? 'Financial performance.' : 'Inventory at a glance.'}</h1><p>{financial ? 'A clear view of profitability, cost, and growth.' : 'Stock position, movement, and capital efficiency.'}</p></div><button className="secondary-button">Export report</button></section>
-      <section className="metrics-grid">
-        {(financial ? [
-          ['Revenue', '$4.82M', '+12.4% YoY'], ['COGS', '$2.68M', '55.6% of revenue'], ['Gross profit', '$2.14M', '44.4% margin'], ['Net income', '$684K', '14.2% margin'],
-        ] : [
-          ['Inventory value', '$1.24M', 'Across 2,846 SKUs'], ['Inventory turns', '4.2×', '+0.4 vs last year'], ['Aging stock', '$106K', '8.6% of inventory'], ['Stockout risk', '18 SKUs', 'Next 30 days'],
-        ]).map((m, i) => <Metric key={m[0]} label={m[0]} value={m[1]} detail={m[2]} tone={i % 2 ? 'blue' : 'green'} />)}
-      </section>
-      {!financial && <section className="panel connector-panel">
-        <div className="connector-heading"><div><span className="eyebrow">PLUG-AND-PLAY CONNECTORS</span><h2>Connect your ERP or WMS</h2><p>Bring inventory data into Pro-sight with a secure, pre-built integration. No custom setup required.</p></div><span className="sync-status"><i /> Live sync ready</span></div>
-        <div className="connector-grid">
-          {connectors.map((connector, i) => {
-            const connected = connectedSystems.includes(connector[0])
-            return <article className={`connector-card ${connected ? 'connected' : ''}`} key={connector[0]}><div className={`connector-logo logo-${i}`}>{connector[0].split(' ').map(word => word[0]).join('').slice(0, 2)}</div><div><span>{connector[1]}</span><strong>{connector[0]}</strong><p>{connector[2]}</p></div><button onClick={() => setConnectedSystems(prev => connected ? prev.filter(name => name !== connector[0]) : [...prev, connector[0]])}>{connected ? <><Icon name="check" size={14} /> Connected</> : 'Connect'}</button></article>
-          })}
-        </div>
-        <button className="browse-connectors">Browse all connectors <Icon name="arrow" size={15} /></button>
-      </section>}
-      <section className="panel statement-panel">
-        <div className="panel-heading"><div><span className="eyebrow">{financial ? 'INCOME STATEMENT' : 'CATEGORY PERFORMANCE'}</span><h2>{financial ? 'FY 2025 year to date' : 'Capital by category'}</h2></div><button className="text-button">Last 12 months</button></div>
-        {(financial ? [['Revenue', '$4,820,000'], ['Cost of goods sold', '($2,680,000)'], ['Gross profit', '$2,140,000'], ['Operating expenses', '($1,298,000)'], ['Taxes & interest', '($158,000)'], ['Net income', '$684,000']] : [['Apparel', '$486,200'], ['Footwear', '$328,400'], ['Accessories', '$214,900'], ['Home & Lifestyle', '$132,600'], ['Other', '$77,900']]).map((row, i, all) => <div className={`statement-row ${i === all.length - 1 ? 'total' : ''}`} key={row[0]}><span>{row[0]}</span><strong>{row[1]}</strong></div>)}
-      </section>
-      {financial && <section className="panel carbon-panel">
-        <div className="panel-heading"><div><span className="eyebrow">CARBON ACCOUNTING</span><h2>Total emissions</h2></div><div className="carbon-total"><strong>3,842</strong><span>tCO₂e · FY 2025 YTD</span></div></div>
-        <div className="scope-grid">
-          <div><span className="scope-dot scope-one" /><small>SCOPE 1</small><strong>486 tCO₂e</strong><p>Direct operations</p><b>12.7%</b></div>
-          <div><span className="scope-dot scope-two" /><small>SCOPE 2</small><strong>724 tCO₂e</strong><p>Purchased energy</p><b>18.8%</b></div>
-          <div><span className="scope-dot scope-three" /><small>SCOPE 3</small><strong>2,632 tCO₂e</strong><p>Supply chain</p><b>68.5%</b></div>
-        </div>
-        <div className="carbon-footer"><span><Icon name="trend" size={16} /> Total emissions are <strong>8.4% lower</strong> year over year</span><b>2,100 carbon credits earned</b></div>
-      </section>}
+      {financial ? <FinancialsPage period={period} /> : <InventoryPage />}
+      {financial && <CarbonPanel period={period} />}
     </>
   )
 }
@@ -351,7 +512,7 @@ export default function App() {
           {tab === 'overview' && <Overview setTab={setTab} />}
           {tab === 'budget' && <Budget />}
           {tab === 'recommendations' && <Recommendations />}
-          {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} />}
+          {(tab === 'inventory' || tab === 'financials') && <DetailPage type={tab} period={customDates && appliedRange ? { start: appliedRange.from, end: appliedRange.to } : { view: dateView as 'YTD' | 'QTD' | 'MTD' }} />}
         </div>
       </main>
     </div>
